@@ -1,8 +1,0 @@
-# Compression domain texture mipmap generation techniques for BC family 
-
-## Introduction
-Texture mipmap은 축소된 텍스처를 반복적으로 pre-filtering하여 저장하고, 화면 공간에서 요구되는 footprint에 따라 적절한 해상도의 영상을 선택하거나 보간하는 표준적인 texture filtering 기법이다. 이 구조는 minification aliasing을 줄이고 texture sampling의 locality를 높이기 때문에 실시간 렌더링 시스템에서 보편적으로 사용된다. 한편 현대의 GPU 텍스처는 메모리 사용량과 대역폭을 줄이기 위해 BC(Block Compression) 계열과 같은 고정률 block format으로 저장되는 경우가 많다. BC1은 하나의 4×4 texel block을 두 개의 RGB565 endpoint와 16개의 2-bit selector로 표현하며, GPU가 압축 상태에서 직접 sampling할 수 있는 대표적인 형식이다.
-
-일반적인 제작 파이프라인에서는 원본 RGB image로부터 전체 mip chain을 생성한 뒤 각 level을 독립적으로 압축한다. 이 방식은 offline asset processing에는 적합하지만, 압축된 mip0만 존재하는 상황에서 실행 중 하위 mip level을 생성해야 할 때는 비효율적이다. 예를 들어 texture streaming, runtime-generated asset, 압축 texture 변환, 제한된 저장 공간을 사용하는 배포 형식에서는 원본 image를 유지하지 않고 압축된 최고 해상도 level만 사용할 수 있다. 이때 전통적인 방법은 입력 BC block을 RGB texel로 완전히 복원하고, 복원된 image를 downsample한 다음, 각 출력 block을 범용 BC encoder로 다시 압축한다. 이러한 `decode → filter → full re-encode` 과정은 대규모 임시 image, 추가 메모리 traffic, 그리고 반복적인 endpoint 탐색과 selector 최적화를 요구한다.
-
-압축 domain에서 직접 mipmap을 생성하는 것은 단순히 compressed block을 평균하는 문제와 다르다. BC1의 endpoint는 RGB565로 양자화되어 있고 selector는 네 개의 palette 위치만 나타내므로, block 내부의 원래 color distribution은 이미 손실되어 있다. 또한 서로 다른 부모 block은 서로 다른 endpoint line과 selector 좌표계를 사용한다. 따라서 endpoint 또는 selector 값을 그대로 평균하면 공통 color space에서의 filtering과 일치하지 않으며, 생성된 block을 다음 level의 입력으로 반복 사용하면 endpoint와 selector quantization error가 mip chain을 따라 누적될 수 있다. 반대로 매 level에서 범용 encoder와 동등한 탐색을 다시 수행하면 compression-domain 처리의 성능상 이점이 사라진다.

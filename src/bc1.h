@@ -7,6 +7,10 @@
 
 namespace bc1
 {
+    // ---------------------------------------------------------------------
+    // BC1 types / constants
+    // ---------------------------------------------------------------------
+
     // Linear mean pyramid. Separate channels keep downsampling contiguous and vectorizable.
     struct MeanImage
     {
@@ -33,6 +37,13 @@ namespace bc1
         }
     };
 
+    // Below this total sample variance (sum of covariance diagonal), a block is
+    // treated as flat: PCA/least-squares fitting is skipped since it would converge
+    // to p0 == p1 == mean anyway.
+    constexpr float kFlatVarianceEpsilon = 1e-10f;
+
+    // Maps a linear child-sample index (parent*4 + quadrant) to its texel position
+    // inside the 4x4 block, so results match a block's native index layout.
     constexpr uint8_t texel_map[16] = {
         0, 1, 4, 5,    // p00
         2, 3, 6, 7,    // p10
@@ -54,6 +65,11 @@ namespace bc1
         uint32_t r, g, b;
     };
 
+    // ---------------------------------------------------------------------
+    // Endpoint decode / palette reconstruction
+    // ---------------------------------------------------------------------
+
+    // Decode the two RGB565 endpoints and reconstruct the palette color for one selector.
     template <bool Opaque = false>
     CDM_INLINE Rgb8 palette_color_rgb8(uint16_t c0, uint16_t c1, uint32_t selector)
     {
@@ -80,12 +96,18 @@ namespace bc1
         return {(r0 + 2 * r1) / 3, (g0 + 2 * g1) / 3, (b0 + 2 * b1) / 3};
     }
 
+    // ---------------------------------------------------------------------
+    // Selector decode
+    // ---------------------------------------------------------------------
+
     CDM_INLINE uint32_t count_2x2_regions(uint32_t flags)
     {
         uint32_t horizontal = (flags & 0x11111111u) + ((flags >> 2) & 0x11111111u);
         return (horizontal & 0x00ff00ffu) + ((horizontal >> 8) & 0x00ff00ffu);
     }
 
+    // For a given selector value, count how many texels in each of the block's four
+    // 2x2 quadrants use that selector (one nibble per quadrant).
     CDM_INLINE uint32_t selector_region_counts(uint32_t indices, uint32_t selector)
     {
         uint32_t different = indices ^ (selector * 0x55555555u);
@@ -145,48 +167,6 @@ static const float c_srgb_to_linear[256] = {
     0.871367100f, 0.879622400f, 0.887923100f, 0.896269400f, 0.904661200f, 0.913098700f, 0.921581900f, 0.930110900f,
     0.938685700f, 0.947306500f, 0.955973400f, 0.964686200f, 0.973445300f, 0.982250600f, 0.991102100f, 1.0f};
 
-    // Shared BC1 encoding helpers
-    template <uint32_t MaxValue>
-    CDM_INLINE uint32_t quantize_linear_channel(float value)
-    {
-        static const std::array<float, MaxValue> thresholds = [] {
-            std::array<float, MaxValue> result{};
-            for (uint32_t i = 0; i < MaxValue; ++i)
-            {
-                float s = (float(i) + 0.5f) / float(MaxValue);
-                result[i] = (s <= 0.04045f) ? (s / 12.92f) : powf((s + 0.055f) / 1.055f, 2.4f);
-            }
-            return result;
-        }();
-
-        return quantize_with_thresholds<MaxValue>(value, thresholds.data());
-    }
-
-    template <bool IsSrgb>
-    CDM_INLINE uint16_t encode_rgb565_fast(Float3 col)
-    {
-        col = clamp01(col);
-        uint32_t r, g, b;
-        if constexpr (IsSrgb)
-        {
-            r = quantize_linear_channel<31>(col.r);
-            g = quantize_linear_channel<63>(col.g);
-            b = quantize_linear_channel<31>(col.b);
-        }
-        else
-        {
-            r = (uint32_t)(col.r * 31.0f + 0.5f);
-            g = (uint32_t)(col.g * 63.0f + 0.5f);
-            b = (uint32_t)(col.b * 31.0f + 0.5f);
-        }
-        return (uint16_t)((r << 11) | (g << 5) | b);
-    }
-
-    CDM_INLINE uint16_t encode_rgb565_fast(Float3 col, bool is_srgb)
-    {
-        return is_srgb ? encode_rgb565_fast<true>(col) : encode_rgb565_fast<false>(col);
-    }
-
     // Sample a single texel at (tx, ty) clamped to valid block dimensions
     CDM_INLINE Float3 sample_texel(
         const Block64 &block, const Float3 palette[4],
@@ -214,17 +194,23 @@ static const float c_srgb_to_linear[256] = {
         }
     }
 
+    // Decode a BC1 block's 4-color palette into linear (or sRGB-decoded) float RGB.
     CDM_INLINE void get_palette_scalar(uint16_t c0, uint16_t c1, bool is_srgb, Float3 palette[4])
     {
         if (is_srgb) get_palette_impl<true>(c0, c1, palette);
         else get_palette_impl<false>(c0, c1, palette);
     }
 
+    // Same as get_palette_scalar, but always uses the 4-color (opaque) interpolation formula.
     CDM_INLINE void get_opaque_palette_scalar(uint16_t c0, uint16_t c1, bool is_srgb, Float3 palette[4])
     {
         if (is_srgb) get_palette_impl<true, true>(c0, c1, palette);
         else get_palette_impl<false, true>(c0, c1, palette);
     }
+
+    // ---------------------------------------------------------------------
+    // Child target construction
+    // ---------------------------------------------------------------------
 
     // Quadrant means with boundary clamping to prevent padding pixel contamination
     // Scalar decode path
@@ -257,6 +243,12 @@ static const float c_srgb_to_linear[256] = {
         }
     }
 
+    // ---------------------------------------------------------------------
+    // Statistics
+    // ---------------------------------------------------------------------
+
+    // Mean and covariance of 16 child samples (4 parent blocks x 4 quadrants),
+    // via the law of total covariance so within-block and between-block spread both count.
     template <typename T>
     CDM_INLINE void compute_child_moments(const Vec3T<T> samples[16], Vec3T<T> &mean, SymMat3T<T> &cov)
     {
@@ -285,7 +277,62 @@ static const float c_srgb_to_linear[256] = {
             cov.accumulate_outer(parent_mean - mean, T(quarter));
     }
 
-    // Scalar encoder
+    // ---------------------------------------------------------------------
+    // RGB565 quantization
+    // ---------------------------------------------------------------------
+
+    // Shared BC1 encoding helpers
+    template <uint32_t MaxValue>
+    CDM_INLINE std::array<float, MaxValue> make_srgb_quantize_thresholds()
+    {
+        std::array<float, MaxValue> result{};
+        for (uint32_t i = 0; i < MaxValue; ++i)
+        {
+            float s = (float(i) + 0.5f) / float(MaxValue);
+            result[i] = (s <= 0.04045f) ? (s / 12.92f) : powf((s + 0.055f) / 1.055f, 2.4f);
+        }
+        return result;
+    }
+
+    template <uint32_t MaxValue>
+    CDM_INLINE uint32_t quantize_linear_channel(float value)
+    {
+        static const std::array<float, MaxValue> thresholds = make_srgb_quantize_thresholds<MaxValue>();
+        return quantize_with_thresholds<MaxValue>(value, thresholds.data());
+    }
+
+    template <bool IsSrgb>
+    CDM_INLINE uint16_t encode_rgb565_fast(Float3 col)
+    {
+        col = clamp01(col);
+        uint32_t r, g, b;
+        if constexpr (IsSrgb)
+        {
+            r = quantize_linear_channel<31>(col.r);
+            g = quantize_linear_channel<63>(col.g);
+            b = quantize_linear_channel<31>(col.b);
+        }
+        else
+        {
+            r = (uint32_t)(col.r * 31.0f + 0.5f);
+            g = (uint32_t)(col.g * 63.0f + 0.5f);
+            b = (uint32_t)(col.b * 31.0f + 0.5f);
+        }
+        return (uint16_t)((r << 11) | (g << 5) | b);
+    }
+
+    // Quantize one linear RGB color to RGB565, honoring the sRGB flag.
+    CDM_INLINE uint16_t encode_rgb565_fast(Float3 col, bool is_srgb)
+    {
+        return is_srgb ? encode_rgb565_fast<true>(col) : encode_rgb565_fast<false>(col);
+    }
+
+    // ---------------------------------------------------------------------
+    // Fit -> Quantize -> Select -> Encode
+    // ---------------------------------------------------------------------
+
+    // Scalar encoder: fit endpoints via PCA + least squares, quantize to RGB565,
+    // then assign the closest palette selector to each of the 16 child samples.
     CDM_INLINE Block64 encode_samples_scalar(const Float3 samples[16], bool is_srgb)
     {
         constexpr float inv3 = 1.0f / 3.0f;
@@ -293,45 +340,55 @@ static const float c_srgb_to_linear[256] = {
         SymMat3 cov;
         compute_child_moments(samples, mean, cov);
 
-        // 3. Find principal axis (PCA) and inital endpoints
-        Float3 axis = compute_principal_axis(cov);
-
-        float min_proj = 1e30f;
-        float max_proj = -1e30f;
-
-        for (int i = 0; i < 16; i++)
+        Float3 p0, p1;
+        if (cov.rr + cov.gg + cov.bb < kFlatVarianceEpsilon)
         {
-            float proj = dot(samples[i] - mean, axis);
-            if (proj < min_proj)
-                min_proj = proj;
-            if (proj > max_proj)
-                max_proj = proj;
+            // Flat block: PCA + least-squares would converge to p0 == p1 == mean anyway.
+            p0 = mean;
+            p1 = mean;
         }
-
-        Float3 p0 = mean + axis * min_proj;
-        Float3 p1 = mean + axis * max_proj;
-
-        // 4. Refine endpoints using least-squares fitting
-        Float3 dir = p1 - p0;
-        float len_sq = length_sq(dir) + 1e-12f;
-        float inv_len_sq = 1.0f / len_sq;
-
-        float sum_w = 0.0f;
-        float sum_w2 = 0.0f;
-        Float3 sum_y = Float3::zero();
-        Float3 sum_wy = Float3::zero();
-        for (int i = 0; i < 16; ++i)
+        else
         {
-            float t = dot(samples[i] - p0, dir) * inv_len_sq;
-            t = t < 0.0f ? 0.0f : (t > 1.0f ? 1.0f : t);
-            float w = roundf(t * 3.0f) * inv3; // snap to 0, 1/3, 2/3, 1
-            sum_w += w;
-            sum_w2 += w * w;
-            sum_y += samples[i];
-            sum_wy += samples[i] * w;
-        }
+            // 3. Find principal axis (PCA) and inital endpoints
+            Float3 axis = compute_principal_axis(cov);
 
-        solve_least_squares_endpoints(sum_w, sum_w2, sum_y, sum_wy, mean, p0, p1);
+            float min_proj = 1e30f;
+            float max_proj = -1e30f;
+
+            for (int i = 0; i < 16; i++)
+            {
+                float proj = dot(samples[i] - mean, axis);
+                if (proj < min_proj)
+                    min_proj = proj;
+                if (proj > max_proj)
+                    max_proj = proj;
+            }
+
+            p0 = mean + axis * min_proj;
+            p1 = mean + axis * max_proj;
+
+            // 4. Refine endpoints using least-squares fitting
+            Float3 dir = p1 - p0;
+            float len_sq = length_sq(dir) + 1e-12f;
+            float inv_len_sq = 1.0f / len_sq;
+
+            float sum_w = 0.0f;
+            float sum_w2 = 0.0f;
+            Float3 sum_y = Float3::zero();
+            Float3 sum_wy = Float3::zero();
+            for (int i = 0; i < 16; ++i)
+            {
+                float t = dot(samples[i] - p0, dir) * inv_len_sq;
+                t = t < 0.0f ? 0.0f : (t > 1.0f ? 1.0f : t);
+                float w = roundf(t * 3.0f) * inv3; // snap to 0, 1/3, 2/3, 1
+                sum_w += w;
+                sum_w2 += w * w;
+                sum_y += samples[i];
+                sum_wy += samples[i] * w;
+            }
+
+            solve_least_squares_endpoints(sum_w, sum_w2, sum_y, sum_wy, mean, p0, p1);
+        }
 
         // 5. Quantize to RGB565 and enforce opaque mode (c0 > c1)
         uint16_t c0 = encode_rgb565_fast(p0, is_srgb);
@@ -372,6 +429,11 @@ static const float c_srgb_to_linear[256] = {
         return Block64{c0, c1, indices};
     }
 
+    // ---------------------------------------------------------------------
+    // GenerateChild
+    // ---------------------------------------------------------------------
+
+    // Combine four BC1 parent blocks (2x2) into one child block, one mip level down.
     CDM_INLINE Block64 generate_child_block_scalar(const Block64 &p00, const Block64 &p10,
                                              const Block64 &p01, const Block64 &p11, bool is_srgb,
                                              Float3 parent_means[4] = nullptr)
@@ -390,6 +452,8 @@ static const float c_srgb_to_linear[256] = {
         return encode_samples_scalar(samples, is_srgb);
     }
 
+    // Same as generate_child_block_scalar, but reads its 16 samples directly from the
+    // mean pyramid instead of re-decoding BC1 blocks (used from mip level 2 onward).
     CDM_INLINE Block64 generate_child_block_from_means_scalar(const MeanImage &source, uint32_t block_x,
                                                         uint32_t block_y, bool is_srgb)
     {
@@ -402,6 +466,462 @@ static const float c_srgb_to_linear[256] = {
         return encode_samples_scalar(samples, is_srgb);
     }
 
-
 #endif
 }
+
+// ===========================================================================
+// CPU SIMD implementation (4 blocks processed in parallel per lane)
+// ===========================================================================
+
+#if !defined(__CUDACC__)
+
+#include <immintrin.h>
+
+// Lightweight 4-lane float vector wrapper for SSE
+struct v4f
+{
+    __m128 v;
+
+    CDM_INLINE v4f() = default;
+    CDM_INLINE v4f(__m128 x) : v(x) {}
+    CDM_INLINE v4f(float s) : v(_mm_set1_ps(s)) {}
+
+    // Basic arithmetic operators (Vertical SIMD)
+    CDM_INLINE v4f operator+(const v4f &o) const { return _mm_add_ps(v, o.v); }
+    CDM_INLINE v4f operator-(const v4f &o) const { return _mm_sub_ps(v, o.v); }
+    CDM_INLINE v4f operator*(const v4f &o) const { return _mm_mul_ps(v, o.v); }
+
+    CDM_INLINE v4f &operator+=(const v4f &o)
+    {
+        v = _mm_add_ps(v, o.v);
+        return *this;
+    }
+};
+
+CDM_INLINE v4f clamp01(const v4f &a)
+{
+    return _mm_min_ps(_mm_max_ps(a.v, _mm_setzero_ps()), _mm_set1_ps(1.0f));
+}
+
+CDM_INLINE v4f round(const v4f &a)
+{
+    // Round to nearest integer (SSE 4.1)
+    return _mm_round_ps(a.v, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
+}
+
+CDM_INLINE v4f reciprocal(const v4f &a)
+{
+    __m128 estimate = _mm_rcp_ps(a.v);
+    return _mm_mul_ps(estimate, _mm_sub_ps(_mm_set1_ps(2.0f), _mm_mul_ps(a.v, estimate)));
+}
+
+// 4-block parallel types using our existing templates
+using Float3x4 = Vec3T<v4f>;
+using SymMat3x4 = SymMat3T<v4f>;
+
+// Principal axis for four blocks in parallel
+CDM_INLINE Float3x4 compute_principal_axis(const SymMat3x4 &cov)
+{
+    const v4f inv_sqrt3 = v4f(0.57735027f);
+    Float3x4 axis0 = {inv_sqrt3, inv_sqrt3, inv_sqrt3};
+    Float3x4 next0 = cov.multiply(axis0);
+    v4f lsq0 = length_sq(next0);
+
+    // The normal path needs one matrix-vector product. Alternate seeds are only
+    // evaluated for the rare covariance orthogonal to (1,1,1).
+    __m128 degenerate0 = _mm_cmplt_ps(lsq0.v, _mm_set1_ps(1e-9f));
+    if (_mm_movemask_ps(degenerate0) == 0)
+    {
+        v4f inv_len = _mm_rsqrt_ps(_mm_max_ps(lsq0.v, _mm_set1_ps(1e-20f)));
+        return next0 * inv_len;
+    }
+
+    const v4f inv_sqrt2 = v4f(0.70710678f);
+    Float3x4 axis1 = {inv_sqrt2, v4f(-0.70710678f), v4f(0.0f)};
+    Float3x4 next1 = cov.multiply(axis1);
+    v4f lsq1 = length_sq(next1);
+
+    // Branchless blend: if lsq0 < 1e-9f, use Candidate 1
+    __m128 mask0 = degenerate0;
+    Float3x4 next;
+    next.r = _mm_blendv_ps(next0.r.v, next1.r.v, mask0);
+    next.g = _mm_blendv_ps(next0.g.v, next1.g.v, mask0);
+    next.b = _mm_blendv_ps(next0.b.v, next1.b.v, mask0);
+    v4f lsq = _mm_blendv_ps(lsq0.v, lsq1.v, mask0);
+
+    // Candidate 2: (0, 1, -1) / sqrt(2)
+    __m128 mask1 = _mm_cmplt_ps(lsq.v, _mm_set1_ps(1e-9f));
+    Float3x4 axis2 = {v4f(0.0f), inv_sqrt2, v4f(-0.70710678f)};
+    Float3x4 next2 = cov.multiply(axis2);
+    v4f lsq2 = length_sq(next2);
+
+    next.r = _mm_blendv_ps(next.r.v, next2.r.v, mask1);
+    next.g = _mm_blendv_ps(next.g.v, next2.g.v, mask1);
+    next.b = _mm_blendv_ps(next.b.v, next2.b.v, mask1);
+    lsq = _mm_blendv_ps(lsq.v, lsq2.v, mask1);
+
+    // Normalize
+    v4f inv_len = _mm_rsqrt_ps(_mm_max_ps(lsq.v, _mm_set1_ps(1e-20f)));
+    Float3x4 result = next * inv_len;
+
+    // Default flat blocks to (1, 0, 0)
+    __m128 flat_mask = _mm_cmplt_ps(lsq.v, _mm_set1_ps(1e-20f));
+    result.r = _mm_blendv_ps(result.r.v, _mm_set1_ps(1.0f), flat_mask);
+    result.g = _mm_blendv_ps(result.g.v, _mm_setzero_ps(), flat_mask);
+    result.b = _mm_blendv_ps(result.b.v, _mm_setzero_ps(), flat_mask);
+    return result;
+}
+
+namespace bc1
+{
+    // Four-block SIMD decode path
+    struct PaletteBatch
+    {
+        Float3x4 colors[4];
+    };
+
+    CDM_INLINE __m128i load_block_field_x4(const Block64 &b0, const Block64 &b1, const Block64 &b2, const Block64 &b3, bool color1)
+    {
+        return _mm_set_epi32(color1 ? b3.c1 : b3.c0, color1 ? b2.c1 : b2.c0,
+                             color1 ? b1.c1 : b1.c0, color1 ? b0.c1 : b0.c0);
+    }
+
+    template <bool IsSrgb>
+    CDM_INLINE v4f rgb8_to_float(__m128i value)
+    {
+        if constexpr (!IsSrgb)
+            return _mm_mul_ps(_mm_cvtepi32_ps(value), _mm_set1_ps(1.0f / 255.0f));
+
+        alignas(16) uint32_t lanes[4];
+        _mm_store_si128((__m128i *)lanes, value);
+        return _mm_set_ps(c_srgb_to_linear[lanes[3]], c_srgb_to_linear[lanes[2]], c_srgb_to_linear[lanes[1]], c_srgb_to_linear[lanes[0]]);
+    }
+
+    // Expand a 5-bit channel (extracted at `shift`) to 8-bit by bit replication.
+    CDM_INLINE __m128i expand5_x4(__m128i c, int shift)
+    {
+        __m128i v = _mm_and_si128(_mm_srl_epi32(c, _mm_cvtsi32_si128(shift)), _mm_set1_epi32(31));
+        return _mm_or_si128(_mm_slli_epi32(v, 3), _mm_srli_epi32(v, 2));
+    }
+
+    // Expand the 6-bit green channel to 8-bit by bit replication.
+    CDM_INLINE __m128i expand6_x4(__m128i c)
+    {
+        __m128i v = _mm_and_si128(_mm_srli_epi32(c, 5), _mm_set1_epi32(63));
+        return _mm_or_si128(_mm_slli_epi32(v, 2), _mm_srli_epi32(v, 4));
+    }
+
+    CDM_INLINE __m128i div3_x4(__m128i v)
+    {
+        return _mm_srli_epi32(_mm_mullo_epi32(v, _mm_set1_epi32(683)), 11);
+    }
+
+    // Decode the 4-color palette for four blocks at once, one SSE lane per block.
+    template <bool IsSrgb, bool Opaque = false>
+    CDM_INLINE PaletteBatch get_palette_x4(__m128i c0, __m128i c1)
+    {
+        __m128i channel0[3] = {expand5_x4(c0, 11), expand6_x4(c0), expand5_x4(c0, 0)};
+        __m128i channel1[3] = {expand5_x4(c1, 11), expand6_x4(c1), expand5_x4(c1, 0)};
+        __m128i four_color;
+        if constexpr (Opaque) four_color = _mm_set1_epi32(-1);
+        else four_color = _mm_cmpgt_epi32(c0, c1);
+        PaletteBatch result;
+        for (int channel = 0; channel < 3; ++channel)
+        {
+            __m128i c2_4 = div3_x4(_mm_add_epi32(_mm_slli_epi32(channel0[channel], 1), channel1[channel]));
+            __m128i c3_4 = div3_x4(_mm_add_epi32(channel0[channel], _mm_slli_epi32(channel1[channel], 1)));
+            __m128i c2, c3;
+            if constexpr (Opaque)
+            {
+                c2 = c2_4;
+                c3 = c3_4;
+            }
+            else
+            {
+                __m128i c2_3 = _mm_srli_epi32(_mm_add_epi32(channel0[channel], channel1[channel]), 1);
+                c2 = _mm_blendv_epi8(c2_3, c2_4, four_color);
+                c3 = _mm_and_si128(c3_4, four_color);
+            }
+            v4f values[4] = {rgb8_to_float<IsSrgb>(channel0[channel]), rgb8_to_float<IsSrgb>(channel1[channel]),
+                             rgb8_to_float<IsSrgb>(c2), rgb8_to_float<IsSrgb>(c3)};
+            for (int selector = 0; selector < 4; ++selector)
+            {
+                if (channel == 0) result.colors[selector].r = values[selector];
+                else if (channel == 1) result.colors[selector].g = values[selector];
+                else result.colors[selector].b = values[selector];
+            }
+        }
+        return result;
+    }
+
+    CDM_INLINE __m128i count_2x2_regions_x4(__m128i flags)
+    {
+        const __m128i horizontal_mask = _mm_set1_epi32(0x11111111u);
+        __m128i horizontal = _mm_add_epi32(_mm_and_si128(flags, horizontal_mask),
+                                           _mm_and_si128(_mm_srli_epi32(flags, 2), horizontal_mask));
+        const __m128i vertical_mask = _mm_set1_epi32(0x00ff00ffu);
+        return _mm_add_epi32(_mm_and_si128(horizontal, vertical_mask),
+                             _mm_and_si128(_mm_srli_epi32(horizontal, 8), vertical_mask));
+    }
+
+    template <int Shift>
+    CDM_INLINE Float3x4 quadrant_mean_x4(const PaletteBatch &palette, const __m128i hist[4])
+    {
+        Float3x4 result = Float3x4::zero();
+        const __m128 scale = _mm_set1_ps(0.25f);
+        const __m128i mask = _mm_set1_epi32(15);
+        for (int selector = 0; selector < 4; ++selector)
+        {
+            __m128i count = _mm_and_si128(_mm_srli_epi32(hist[selector], Shift), mask);
+            v4f weight = _mm_mul_ps(_mm_cvtepi32_ps(count), scale);
+            result += palette.colors[selector] * weight;
+        }
+        return result;
+    }
+
+    // Child target construction (SIMD): quadrant means for four blocks at once.
+    template <bool IsSrgb>
+    CDM_INLINE void get_quadrant_means_x4(const Block64 &b0, const Block64 &b1, const Block64 &b2, const Block64 &b3,
+                                          Float3x4 out[4])
+    {
+        __m128i c0 = load_block_field_x4(b0, b1, b2, b3, false);
+        __m128i c1 = load_block_field_x4(b0, b1, b2, b3, true);
+        PaletteBatch palette = get_palette_x4<IsSrgb>(c0, c1);
+        __m128i indices = _mm_set_epi32(b3.indices, b2.indices, b1.indices, b0.indices);
+
+        const __m128i low_mask = _mm_set1_epi32(0x55555555u);
+        __m128i low = _mm_and_si128(indices, low_mask);
+        __m128i high = _mm_and_si128(_mm_srli_epi32(indices, 1), low_mask);
+        __m128i hist[4] = {
+            count_2x2_regions_x4(_mm_andnot_si128(_mm_or_si128(low, high), low_mask)),
+            count_2x2_regions_x4(_mm_andnot_si128(high, low)),
+            count_2x2_regions_x4(_mm_andnot_si128(low, high)),
+            count_2x2_regions_x4(_mm_and_si128(low, high))};
+        out[0] = quadrant_mean_x4<0>(palette, hist);
+        out[1] = quadrant_mean_x4<4>(palette, hist);
+        out[2] = quadrant_mean_x4<16>(palette, hist);
+        out[3] = quadrant_mean_x4<20>(palette, hist);
+    }
+
+    // Fit -> Quantize -> Select -> Encode (SIMD): four child blocks packed from the
+    // fitted endpoints, one SSE lane per block.
+    template <bool IsSrgb>
+    CDM_INLINE void pack_child_blocks_x4(const Float3x4 samples[16], const Float3x4 &p0, const Float3x4 &p1, Block64 out[4])
+    {
+        alignas(16) float p0r[4], p0g[4], p0b[4], p1r[4], p1g[4], p1b[4];
+        _mm_store_ps(p0r, p0.r.v); _mm_store_ps(p0g, p0.g.v); _mm_store_ps(p0b, p0.b.v);
+        _mm_store_ps(p1r, p1.r.v); _mm_store_ps(p1g, p1.g.v); _mm_store_ps(p1b, p1.b.v);
+
+        alignas(16) uint32_t c0[4], c1[4];
+        for (int lane = 0; lane < 4; ++lane)
+        {
+            c0[lane] = encode_rgb565_fast<IsSrgb>({p0r[lane], p0g[lane], p0b[lane]});
+            c1[lane] = encode_rgb565_fast<IsSrgb>({p1r[lane], p1g[lane], p1b[lane]});
+            if (c0[lane] < c1[lane]) std::swap(c0[lane], c1[lane]);
+            else if (c0[lane] == c1[lane])
+            {
+                if (c1[lane] > 0) --c1[lane];
+                else ++c0[lane];
+            }
+        }
+
+        PaletteBatch palette = get_palette_x4<IsSrgb, true>(_mm_load_si128((const __m128i *)c0), _mm_load_si128((const __m128i *)c1));
+        __m128i packed_indices = _mm_setzero_si128();
+        for (int i = 0; i < 16; ++i)
+        {
+            v4f best_distance(1e30f);
+            __m128i best_selector = _mm_setzero_si128();
+            for (int selector = 0; selector < 4; ++selector)
+            {
+                v4f distance = length_sq(samples[i] - palette.colors[selector]);
+                __m128 mask = _mm_cmplt_ps(distance.v, best_distance.v);
+                best_distance = _mm_blendv_ps(best_distance.v, distance.v, mask);
+                best_selector = _mm_blendv_epi8(best_selector, _mm_set1_epi32(selector), _mm_castps_si128(mask));
+            }
+            packed_indices = _mm_or_si128(packed_indices,
+                _mm_sll_epi32(best_selector, _mm_cvtsi32_si128(2 * texel_map[i])));
+        }
+
+        alignas(16) uint32_t indices[4];
+        _mm_store_si128((__m128i *)indices, packed_indices);
+        for (int lane = 0; lane < 4; ++lane)
+            out[lane] = Block64{(uint16_t)c0[lane], (uint16_t)c1[lane], indices[lane]};
+    }
+
+    template <bool IsSrgb>
+    CDM_INLINE void encode_samples_x4(const Float3x4 samples[16], Block64 *out_blocks)
+    {
+        constexpr float inv3 = 1.0f / 3.0f;
+        Float3x4 mean;
+        SymMat3x4 cov;
+        compute_child_moments(samples, mean, cov);
+
+        Float3x4 p0, p1;
+        v4f variance = cov.rr + cov.gg + cov.bb;
+        __m128 flat_mask = _mm_cmplt_ps(variance.v, _mm_set1_ps(kFlatVarianceEpsilon));
+        if (_mm_movemask_ps(flat_mask) == 0xF)
+        {
+            // All four blocks in this lane group are flat: PCA + least-squares would
+            // converge to p0 == p1 == mean anyway.
+            p0 = mean;
+            p1 = mean;
+        }
+        else
+        {
+            // 4. Principal Axis (PCA) for 4 blocks at once!
+            Float3x4 axis = compute_principal_axis(cov);
+
+            v4f min_proj = v4f(1e30f);
+            v4f max_proj = v4f(-1e30f);
+            for (int i = 0; i < 16; ++i)
+            {
+                v4f proj = dot(samples[i] - mean, axis);
+                min_proj = _mm_min_ps(min_proj.v, proj.v);
+                max_proj = _mm_max_ps(max_proj.v, proj.v);
+            }
+
+            p0 = mean + axis * min_proj;
+            p1 = mean + axis * max_proj;
+
+            // 5. Refine endpoints using Least-Squares in parallel
+            Float3x4 dir = p1 - p0;
+            v4f len_sq = length_sq(dir) + v4f(1e-12f);
+            v4f inv_len_sq = reciprocal(len_sq);
+
+            v4f sum_w = v4f(0.0f);
+            v4f sum_w2 = v4f(0.0f);
+            Float3x4 sum_y = Float3x4::zero();
+            Float3x4 sum_wy = Float3x4::zero();
+
+            for (int i = 0; i < 16; ++i)
+            {
+                v4f t = dot(samples[i] - p0, dir) * inv_len_sq;
+                t = clamp01(t);
+                v4f w = round(t * v4f(3.0f)) * v4f(inv3);
+                sum_w += w;
+                sum_w2 += w * w;
+                sum_y += samples[i];
+                sum_wy += samples[i] * w;
+            }
+
+            // Solve 2x2 normal equations for 4 blocks simultaneously
+            v4f det = v4f(16.0f) * sum_w2 - sum_w * sum_w;
+            __m128 mask = _mm_cmplt_ps(det.v, _mm_set1_ps(1e-6f));
+            v4f safe_det = _mm_blendv_ps(det.v, _mm_set1_ps(1.0f), mask);
+            v4f inv_det = reciprocal(safe_det);
+
+            Float3x4 solved_p0 = (sum_y * sum_w2 - sum_wy * sum_w) * inv_det;
+            Float3x4 solve_dir = (sum_wy * v4f(16.0f) - sum_y * sum_w) * inv_det;
+            Float3x4 solved_p1 = solved_p0 + solve_dir;
+
+            // Fall back to mean if det is near zero
+            p0.r = _mm_blendv_ps(solved_p0.r.v, mean.r.v, mask);
+            p0.g = _mm_blendv_ps(solved_p0.g.v, mean.g.v, mask);
+            p0.b = _mm_blendv_ps(solved_p0.b.v, mean.b.v, mask);
+
+            p1.r = _mm_blendv_ps(solved_p1.r.v, mean.r.v, mask);
+            p1.g = _mm_blendv_ps(solved_p1.g.v, mean.g.v, mask);
+            p1.b = _mm_blendv_ps(solved_p1.b.v, mean.b.v, mask);
+        }
+
+        pack_child_blocks_x4<IsSrgb>(samples, p0, p1, out_blocks);
+    }
+
+    CDM_INLINE Float3x4 block_means_x4(const Float3x4 quadrants[4])
+    {
+        return (quadrants[0] + quadrants[1] + quadrants[2] + quadrants[3]) * v4f(0.25f);
+    }
+
+    CDM_INLINE void store_block_mean_pairs_x4(const Float3x4 even_quadrants[4], const Float3x4 odd_quadrants[4], const MeanImage &destination, uint32_t x, uint32_t y)
+    {
+        Float3x4 even = block_means_x4(even_quadrants);
+        Float3x4 odd = block_means_x4(odd_quadrants);
+        size_t index = (size_t)y * destination.width + x;
+        _mm_storeu_ps(destination.r + index, _mm_unpacklo_ps(even.r.v, odd.r.v));
+        _mm_storeu_ps(destination.r + index + 4, _mm_unpackhi_ps(even.r.v, odd.r.v));
+        _mm_storeu_ps(destination.g + index, _mm_unpacklo_ps(even.g.v, odd.g.v));
+        _mm_storeu_ps(destination.g + index + 4, _mm_unpackhi_ps(even.g.v, odd.g.v));
+        _mm_storeu_ps(destination.b + index, _mm_unpacklo_ps(even.b.v, odd.b.v));
+        _mm_storeu_ps(destination.b + index + 4, _mm_unpackhi_ps(even.b.v, odd.b.v));
+    }
+
+    // GenerateChild (SIMD): combine two rows of 2x4 parent blocks into four child blocks.
+    template <bool IsSrgb>
+    CDM_INLINE void generate_child_blocks_x4_impl(const Block64 *src0, const Block64 *src1, Block64 *out_blocks,
+                                                   MeanImage *means, uint32_t source_x, uint32_t source_y0, uint32_t source_y1)
+    {
+        Float3x4 samples[16];
+        get_quadrant_means_x4<IsSrgb>(src0[0], src0[2], src0[4], src0[6], samples + 0);
+        get_quadrant_means_x4<IsSrgb>(src0[1], src0[3], src0[5], src0[7], samples + 4);
+        get_quadrant_means_x4<IsSrgb>(src1[0], src1[2], src1[4], src1[6], samples + 8);
+        get_quadrant_means_x4<IsSrgb>(src1[1], src1[3], src1[5], src1[7], samples + 12);
+        if (means)
+        {
+            store_block_mean_pairs_x4(samples + 0, samples + 4, *means, source_x, source_y0);
+            store_block_mean_pairs_x4(samples + 8, samples + 12, *means, source_x, source_y1);
+        }
+        encode_samples_x4<IsSrgb>(samples, out_blocks);
+    }
+
+    CDM_INLINE void generate_child_blocks_x4(const Block64 *src0, const Block64 *src1, Block64 *out_blocks, bool is_srgb,
+                                              MeanImage *means = nullptr, uint32_t source_x = 0,
+                                              uint32_t source_y0 = 0, uint32_t source_y1 = 0)
+    {
+        if (is_srgb) generate_child_blocks_x4_impl<true>(src0, src1, out_blocks, means, source_x, source_y0, source_y1);
+        else generate_child_blocks_x4_impl<false>(src0, src1, out_blocks, means, source_x, source_y0, source_y1);
+    }
+
+    // Same as generate_child_blocks_x4, but reads its 16 samples directly from the mean
+    // pyramid (used from mip level 2 onward), handling a partial (<4) lane count at the
+    // right edge of a row.
+    template <bool IsSrgb>
+    CDM_INLINE void generate_child_blocks_from_means_x4(const MeanImage &source,
+                                                         uint32_t block_x, uint32_t block_y, uint32_t valid_lanes,
+                                                         Block64 *destination)
+    {
+        Float3x4 samples[16];
+        if (valid_lanes == 4 && (block_x + 4) * 4 <= source.width && (block_y + 1) * 4 <= source.height)
+        {
+            for (uint32_t i = 0; i < 16; ++i)
+            {
+                uint32_t local = texel_map[i];
+                size_t index = (size_t)(block_y * 4 + (local >> 2)) * source.width + block_x * 4 + (local & 3u);
+                samples[i] = {
+                    _mm_set_ps(source.r[index + 12], source.r[index + 8], source.r[index + 4], source.r[index]),
+                    _mm_set_ps(source.g[index + 12], source.g[index + 8], source.g[index + 4], source.g[index]),
+                    _mm_set_ps(source.b[index + 12], source.b[index + 8], source.b[index + 4], source.b[index])};
+            }
+        }
+        else
+        {
+            for (uint32_t i = 0; i < 16; ++i)
+            {
+                uint32_t local = texel_map[i];
+                Float3 lane[4];
+                for (uint32_t j = 0; j < 4; ++j)
+                {
+                    uint32_t lane_x = block_x + std::min(j, valid_lanes - 1);
+                    lane[j] = source.get(lane_x * 4 + (local & 3u), block_y * 4 + (local >> 2));
+                }
+                samples[i] = {
+                    _mm_set_ps(lane[3].r, lane[2].r, lane[1].r, lane[0].r),
+                    _mm_set_ps(lane[3].g, lane[2].g, lane[1].g, lane[0].g),
+                    _mm_set_ps(lane[3].b, lane[2].b, lane[1].b, lane[0].b)};
+            }
+        }
+        Block64 encoded[4];
+        encode_samples_x4<IsSrgb>(samples, encoded);
+        for (uint32_t lane = 0; lane < valid_lanes; ++lane)
+            destination[lane] = encoded[lane];
+    }
+
+    CDM_INLINE void generate_child_blocks_from_means_x4(const MeanImage &source,
+                                                         uint32_t block_x, uint32_t block_y, uint32_t valid_lanes,
+                                                         Block64 *destination, bool is_srgb)
+    {
+        if (is_srgb) generate_child_blocks_from_means_x4<true>(source, block_x, block_y, valid_lanes, destination);
+        else generate_child_blocks_from_means_x4<false>(source, block_x, block_y, valid_lanes, destination);
+    }
+}
+
+#endif

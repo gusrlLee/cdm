@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <cstddef>
 
+// Execution strategy for mip generation; independent of the block compression format.
 enum class Backend
 {
     CPU,
@@ -10,6 +11,7 @@ enum class Backend
     CUDA,
 };
 
+// Block compression format of an Image. Only BC1 is implemented end-to-end today.
 enum class Format
 {
     Unknown = 0,
@@ -27,6 +29,7 @@ struct Options
     Backend backend = Backend::CPU_SIMD;
 };
 
+// Dimensions and byte range of one mip level within Image::data.
 struct MipLevel
 {
     uint32_t width;
@@ -39,6 +42,7 @@ struct MipLevel
 
 constexpr uint32_t MAX_MIP_LEVELS = 16;
 
+// A full mip chain as one flat allocation; mips[level] indexes into it.
 struct Image
 {
     uint32_t width = 0;
@@ -55,6 +59,7 @@ struct Image
     {
         return (level < mip_count && data) ? data + mips[level].byte_offset : nullptr;
     }
+    
     uint8_t *get_mip_data(uint32_t level)
     {
         return (level < mip_count && data) ? data + mips[level].byte_offset : nullptr;

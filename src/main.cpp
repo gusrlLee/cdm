@@ -8,65 +8,62 @@
 #include <iostream>
 #include <string_view>
 
-namespace
+static bool prepare_mip_chain(Image &image)
 {
-    bool prepare_mip_chain(Image &image)
+    uint32_t width = image.width;
+    uint32_t height = image.height;
+    const size_t block_bytes = (image.format == Format::BC1 || image.format == Format::BC4) ? 8 : 16;
+    MipLevel levels[MAX_MIP_LEVELS];
+    size_t total_bytes = 0;
+    uint32_t count = 0;
+
+    while (count < MAX_MIP_LEVELS)
     {
-        uint32_t width = image.width;
-        uint32_t height = image.height;
-        const size_t block_bytes = (image.format == Format::BC1 || image.format == Format::BC4) ? 8 : 16;
-        MipLevel levels[MAX_MIP_LEVELS];
-        size_t total_bytes = 0;
-        uint32_t count = 0;
+        const uint32_t blocks_x = std::max(1u, (width + 3) / 4);
+        const uint32_t blocks_y = std::max(1u, (height + 3) / 4);
+        const size_t bytes = (size_t)blocks_x * blocks_y * block_bytes;
+        levels[count++] = {width, height, blocks_x, blocks_y, total_bytes, bytes};
+        total_bytes += bytes;
 
-        while (count < MAX_MIP_LEVELS)
-        {
-            const uint32_t blocks_x = std::max(1u, (width + 3) / 4);
-            const uint32_t blocks_y = std::max(1u, (height + 3) / 4);
-            const size_t bytes = (size_t)blocks_x * blocks_y * block_bytes;
-            levels[count++] = {width, height, blocks_x, blocks_y, total_bytes, bytes};
-            total_bytes += bytes;
+        if (width == 1 && height == 1)
+            break;
+        width = std::max(1u, width / 2);
+        height = std::max(1u, height / 2);
+    }
 
-            if (width == 1 && height == 1)
-                break;
-            width = std::max(1u, width / 2);
-            height = std::max(1u, height / 2);
-        }
-
-        if (image.mip_count >= count && image.data)
-            return true;
-
-        uint8_t *data = static_cast<uint8_t *>(std::malloc(total_bytes));
-        if (!data)
-            return false;
-        std::memcpy(data, image.data, image.mips[0].byte_size);
-        std::free(image.data);
-        image.data = data;
-        image.data_size = total_bytes;
-        image.mip_count = count;
-        std::copy_n(levels, count, image.mips);
+    if (image.mip_count >= count && image.data)
         return true;
-    }
 
-    bool parse_backend(std::string_view value, Backend &backend)
-    {
-        if (value == "cpu") backend = Backend::CPU;
-        else if (value == "simd" || value == "cpu-simd" || value == "cpu_simd") backend = Backend::CPU_SIMD;
-        else if (value == "cuda") backend = Backend::CUDA;
-        else return false;
-        return true;
-    }
+    uint8_t *data = static_cast<uint8_t *>(std::malloc(total_bytes));
+    if (!data)
+        return false;
+    std::memcpy(data, image.data, image.mips[0].byte_size);
+    std::free(image.data);
+    image.data = data;
+    image.data_size = total_bytes;
+    image.mip_count = count;
+    std::copy_n(levels, count, image.mips);
+    return true;
+}
 
-    const char *backend_name(Backend backend)
+static bool parse_backend(std::string_view value, Backend &backend)
+{
+    if (value == "cpu") backend = Backend::CPU;
+    else if (value == "simd" || value == "cpu-simd" || value == "cpu_simd") backend = Backend::CPU_SIMD;
+    else if (value == "cuda") backend = Backend::CUDA;
+    else return false;
+    return true;
+}
+
+static const char *backend_name(Backend backend)
+{
+    switch (backend)
     {
-        switch (backend)
-        {
-        case Backend::CPU: return "CPU";
-        case Backend::CPU_SIMD: return "CPU_SIMD";
-        case Backend::CUDA: return "CUDA";
-        }
-        return "Unknown";
+    case Backend::CPU: return "CPU";
+    case Backend::CPU_SIMD: return "CPU_SIMD";
+    case Backend::CUDA: return "CUDA";
     }
+    return "Unknown";
 }
 
 int main(int argc, char **argv)

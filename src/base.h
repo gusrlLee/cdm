@@ -10,6 +10,7 @@
 
 
 
+// Raw 8-byte block layout shared by BC1/BC4 (two endpoints + packed indices).
 struct Block64
 {
     uint16_t c0;
@@ -17,6 +18,7 @@ struct Block64
     uint32_t indices;
 };
 
+// Raw 16-byte block layout shared by BC2/BC3/BC5/BC6H/BC7.
 struct Block128
 {
     uint64_t low;
@@ -25,6 +27,7 @@ struct Block128
 
 static_assert(sizeof(Block64) == 8 && sizeof(Block128) == 16);
 
+// Generic 3-component vector, instantiated with float (scalar) or v4f (SSE 4-wide).
 template <typename T>
 struct Vec3T
 {
@@ -63,6 +66,7 @@ CDM_INLINE Vec3T<T> clamp01(const Vec3T<T> &v)
     return {c(v.r), c(v.g), c(v.b)};
 }
 
+// Symmetric 3x3 covariance matrix, accumulated incrementally via accumulate_outer.
 template <typename T>
 struct SymMat3T
 {
@@ -127,6 +131,8 @@ CDM_INLINE Float3 compute_principal_axis(const SymMat3 &cov)
     return (lsq > 1e-20f) ? (next * inv_len) : Float3{1.0f, 0.0f, 0.0f};
 }
 
+// Fit two endpoints along the principal axis by least squares, given per-sample
+// interpolation weights already snapped to BC1's four selector values (0, 1/3, 2/3, 1).
 template <typename T>
 CDM_INLINE bool solve_least_squares_endpoints(
     const T &sum_w, const T &sum_w2,

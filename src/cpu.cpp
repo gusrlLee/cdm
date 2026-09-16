@@ -24,9 +24,9 @@ static bc1::MeanImage make_mean_image(float *storage, size_t capacity, uint32_t 
 }
 
 static void downsample_channel_scalar(const float *source, uint32_t source_width, uint32_t source_height,
-                               float *destination, uint32_t destination_width, uint32_t destination_height)
+                               float *destination, uint32_t destination_width, uint32_t begin, uint32_t end)
 {
-    for (uint32_t y = 0; y < destination_height; ++y)
+    for (uint32_t y = begin; y < end; ++y)
     {
         const uint32_t y0 = y * 2;
         const uint32_t y1 = std::min(y0 + 1, source_height - 1);
@@ -43,9 +43,9 @@ static void downsample_channel_scalar(const float *source, uint32_t source_width
 }
 
 static void downsample_channel_simd(const float *source, uint32_t source_width, uint32_t source_height,
-                             float *destination, uint32_t destination_width, uint32_t destination_height)
+                             float *destination, uint32_t destination_width, uint32_t begin, uint32_t end)
 {
-    for (uint32_t y = 0; y < destination_height; ++y)
+    for (uint32_t y = begin; y < end; ++y)
     {
         const uint32_t y0 = y * 2;
         const uint32_t y1 = std::min(y0 + 1, source_height - 1);
@@ -67,15 +67,6 @@ static void downsample_channel_simd(const float *source, uint32_t source_width, 
             output[x] = (row0[x0] + row0[x1] + row1[x0] + row1[x1]) * 0.25f;
         }
     }
-}
-
-template <bool Simd>
-static void downsample_means(const bc1::MeanImage &source, const bc1::MeanImage &destination)
-{
-    auto downsample = Simd ? downsample_channel_simd : downsample_channel_scalar;
-    downsample(source.r, source.width, source.height, destination.r, destination.width, destination.height);
-    downsample(source.g, source.width, source.height, destination.g, destination.width, destination.height);
-    downsample(source.b, source.width, source.height, destination.b, destination.width, destination.height);
 }
 
 // ---------------------------------------------------------------------
@@ -183,6 +174,19 @@ private:
 
 static TaskDispatcher g_dispatcher;
 
+template <bool Simd>
+static void downsample_means(const bc1::MeanImage &source, const bc1::MeanImage &destination)
+{
+    auto downsample = Simd ? downsample_channel_simd : downsample_channel_scalar;
+    auto process_rows = [&](uint32_t begin, uint32_t end)
+    {
+        downsample(source.r, source.width, source.height, destination.r, destination.width, begin, end);
+        downsample(source.g, source.width, source.height, destination.g, destination.width, begin, end);
+        downsample(source.b, source.width, source.height, destination.b, destination.width, begin, end);
+    };
+    g_dispatcher.parallel_rows(destination.height, (size_t)destination.width * destination.height * 3, process_rows);
+}
+
 // ---------------------------------------------------------------------
 // Mip-level processing (dispatches into bc1.h's scalar / SIMD algorithms)
 // ---------------------------------------------------------------------
@@ -230,7 +234,7 @@ static void process_mip_rows(const Image *image, const MipLevel &previous, const
         {
             for (; bx + 3 < current.block_count_x && (bx + 3) * 2 + 1 < previous.block_count_x; bx += 4)
                 bc1::generate_child_blocks_x4(row0 + bx * 2, row1 + bx * 2, output + bx,
-                    image->is_srgb, &means, bx * 2, py0, py1, current.width, current.height);
+                    image->is_srgb, means, bx * 2, py0, py1, current.width, current.height);
         }
         for (; bx < current.block_count_x; ++bx)
         {

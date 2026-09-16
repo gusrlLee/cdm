@@ -52,24 +52,6 @@ constexpr uint32_t MakeFourCC(char c0, char c1, char c2, char c3)
            ((uint32_t)(uint8_t)(c3) << 24);
 }
 
-static size_t GetBytesPerBlock(Format format)
-{
-    switch (format)
-    {
-    case Format::BC1:
-    case Format::BC4:
-        return 8;
-    case Format::BC2:
-    case Format::BC3:
-    case Format::BC5:
-    case Format::BC6H:
-    case Format::BC7:
-        return 16;
-    default:
-        return 0;
-    }
-}
-
 void free_image(Image *image)
 {
     if (image && image->data)
@@ -162,40 +144,6 @@ bool load_dds(const char *filepath, Image *out_image)
                 out_image->format = Format::BC1;
                 out_image->is_srgb = true;
                 break;
-            case 74:
-                out_image->format = Format::BC2;
-                out_image->is_srgb = false;
-                break;
-            case 75:
-                out_image->format = Format::BC2;
-                out_image->is_srgb = true;
-                break;
-            case 77:
-                out_image->format = Format::BC3;
-                out_image->is_srgb = false;
-                break;
-            case 78:
-                out_image->format = Format::BC3;
-                out_image->is_srgb = true;
-                break;
-            case 80:
-                out_image->format = Format::BC4;
-                break;
-            case 83:
-                out_image->format = Format::BC5;
-                break;
-            case 95:
-            case 96:
-                out_image->format = Format::BC6H;
-                break;
-            case 98:
-                out_image->format = Format::BC7;
-                out_image->is_srgb = false;
-                break;
-            case 99:
-                out_image->format = Format::BC7;
-                out_image->is_srgb = true;
-                break;
             default:
                 fclose(fp);
                 return false;
@@ -209,7 +157,7 @@ bool load_dds(const char *filepath, Image *out_image)
         return false;
     }
 
-    size_t block_bytes = GetBytesPerBlock(out_image->format);
+    constexpr size_t block_bytes = 8;
     uint32_t curr_w = out_image->width;
     uint32_t curr_h = out_image->height;
     size_t total_bytes = 0;
@@ -282,33 +230,12 @@ bool save_dds(const char *filepath, const Image *image)
     dxt10.resource_dimension = 3; // TEXTURE2D
     dxt10.array_size = 1;
 
-    switch (image->format)
+    if (image->format != Format::BC1)
     {
-    case Format::BC1:
-        dxt10.dxgi_format = image->is_srgb ? 72 : 71;
-        break;
-    case Format::BC2:
-        dxt10.dxgi_format = image->is_srgb ? 75 : 74;
-        break;
-    case Format::BC3:
-        dxt10.dxgi_format = image->is_srgb ? 78 : 77;
-        break;
-    case Format::BC4:
-        dxt10.dxgi_format = 80;
-        break;
-    case Format::BC5:
-        dxt10.dxgi_format = 83;
-        break;
-    case Format::BC6H:
-        dxt10.dxgi_format = 95;
-        break;
-    case Format::BC7:
-        dxt10.dxgi_format = image->is_srgb ? 99 : 98;
-        break;
-    default:
         fclose(fp);
         return false;
     }
+    dxt10.dxgi_format = image->is_srgb ? 72 : 71;
 
     fwrite(&dxt10, sizeof(dxt10), 1, fp);
 

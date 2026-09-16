@@ -11,17 +11,10 @@ enum class Backend
     CUDA,
 };
 
-// Block compression format of an Image. Only BC1 is implemented end-to-end today.
 enum class Format
 {
     Unknown = 0,
     BC1,
-    BC2,
-    BC3,
-    BC4,
-    BC5,
-    BC6H,
-    BC7,
 };
 
 struct Options
@@ -54,17 +47,7 @@ struct Image
     MipLevel mips[MAX_MIP_LEVELS];
     uint8_t *data = nullptr;
     size_t data_size = 0;
-
-    const uint8_t *get_mip_data(uint32_t level) const
-    {
-        return (level < mip_count && data) ? data + mips[level].byte_offset : nullptr;
-    }
-    
-    uint8_t *get_mip_data(uint32_t level)
-    {
-        return (level < mip_count && data) ? data + mips[level].byte_offset : nullptr;
-    }
 };
 
-bool generate_mipmaps(Image *image, const Options &options = {});
+bool generate_mipmaps(Image *image, const Options &options);
 bool prepare_mipmap_backend(const Image *image, Backend backend);

@@ -191,7 +191,6 @@ static __device__ __forceinline__ void encode_block_half_warp(Color sample,
         c0 = encode_rgb565<Srgb>(p0);
         c1 = encode_rgb565<Srgb>(p1);
         if (c0 < c1) { uint32_t swap = c0; c0 = c1; c1 = swap; }
-        else if (c0 == c1) { if (c1) --c1; else ++c0; }
     }
     c0 = __shfl_sync(mask, c0, 0, 16);
     c1 = __shfl_sync(mask, c1, 0, 16);

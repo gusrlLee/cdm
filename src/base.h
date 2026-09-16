@@ -88,19 +88,22 @@ using SymMat3 = SymMat3T<float>;
 // Principal axis for scalar Float3 (Fallback for degenerate axis)
 CDM_INLINE Float3 compute_principal_axis(const SymMat3 &cov)
 {
+    const float matrix_norm_sq = cov.rr * cov.rr + cov.gg * cov.gg + cov.bb * cov.bb
+        + 2.0f * (cov.rg * cov.rg + cov.rb * cov.rb + cov.gb * cov.gb);
+    const float degenerate_threshold = matrix_norm_sq * 1e-6f;
     const float inv_sqrt3 = 0.57735027f;
     Float3 axis = {inv_sqrt3, inv_sqrt3, inv_sqrt3};
     Float3 next = cov.multiply(axis);
     float lsq = length_sq(next);
 
     // If variation is orthogonal to (1,1,1), test candidate orthogonal axes
-    if (lsq < 1e-9f)
+    if (lsq <= degenerate_threshold)
     {
         const float inv_sqrt2 = 0.70710678f;
         axis = {inv_sqrt2, -inv_sqrt2, 0.0f};
         next = cov.multiply(axis);
         lsq = length_sq(next);
-        if (lsq < 1e-9f)
+        if (lsq <= degenerate_threshold)
         {
             axis = {0.0f, inv_sqrt2, -inv_sqrt2};
             next = cov.multiply(axis);
@@ -108,6 +111,5 @@ CDM_INLINE Float3 compute_principal_axis(const SymMat3 &cov)
         }
     }
 
-    float inv_len = (lsq > 1e-20f) ? (1.0f / sqrtf(lsq)) : 0.0f;
-    return (lsq > 1e-20f) ? (next * inv_len) : Float3{1.0f, 0.0f, 0.0f};
+    return lsq > degenerate_threshold ? next * (1.0f / sqrtf(lsq)) : Float3{1.0f, 0.0f, 0.0f};
 }

@@ -347,7 +347,6 @@ static const float c_srgb_to_linear[256] = {
         uint16_t c0 = encode_rgb565<IsSrgb>(p0);
         uint16_t c1 = encode_rgb565<IsSrgb>(p1);
         if (c0 < c1) std::swap(c0, c1);
-        else if (c0 == c1) { if (c1) --c1; else ++c0; }
 
         Float3 palette[4];
         get_palette_impl<IsSrgb, true>(c0, c1, palette);
@@ -504,6 +503,9 @@ using SymMat3x4 = SymMat3T<v4f>;
 // Principal axis for four blocks in parallel
 CDM_INLINE Float3x4 compute_principal_axis(const SymMat3x4 &cov)
 {
+    v4f matrix_norm_sq = cov.rr * cov.rr + cov.gg * cov.gg + cov.bb * cov.bb
+        + (cov.rg * cov.rg + cov.rb * cov.rb + cov.gb * cov.gb) * v4f(2.0f);
+    v4f degenerate_threshold = matrix_norm_sq * v4f(1e-6f);
     const v4f inv_sqrt3 = v4f(0.57735027f);
     Float3x4 axis0 = {inv_sqrt3, inv_sqrt3, inv_sqrt3};
     Float3x4 next0 = cov.multiply(axis0);
@@ -511,10 +513,10 @@ CDM_INLINE Float3x4 compute_principal_axis(const SymMat3x4 &cov)
 
     // The normal path needs one matrix-vector product. Alternate seeds are only
     // evaluated for the rare covariance orthogonal to (1,1,1).
-    __m128 degenerate0 = _mm_cmplt_ps(lsq0.v, _mm_set1_ps(1e-9f));
+    __m128 degenerate0 = _mm_cmple_ps(lsq0.v, degenerate_threshold.v);
     if (_mm_movemask_ps(degenerate0) == 0)
     {
-        v4f inv_len = _mm_rsqrt_ps(_mm_max_ps(lsq0.v, _mm_set1_ps(1e-20f)));
+        v4f inv_len = _mm_rsqrt_ps(lsq0.v);
         return next0 * inv_len;
     }
 
@@ -523,7 +525,7 @@ CDM_INLINE Float3x4 compute_principal_axis(const SymMat3x4 &cov)
     Float3x4 next1 = cov.multiply(axis1);
     v4f lsq1 = length_sq(next1);
 
-    // Branchless blend: if lsq0 < 1e-9f, use Candidate 1
+    // Branchless blend: use Candidate 1 when the first seed is nearly orthogonal.
     __m128 mask0 = degenerate0;
     Float3x4 next;
     next.r = _mm_blendv_ps(next0.r.v, next1.r.v, mask0);
@@ -532,7 +534,7 @@ CDM_INLINE Float3x4 compute_principal_axis(const SymMat3x4 &cov)
     v4f lsq = _mm_blendv_ps(lsq0.v, lsq1.v, mask0);
 
     // Candidate 2: (0, 1, -1) / sqrt(2)
-    __m128 mask1 = _mm_cmplt_ps(lsq.v, _mm_set1_ps(1e-9f));
+    __m128 mask1 = _mm_cmple_ps(lsq.v, degenerate_threshold.v);
     Float3x4 axis2 = {v4f(0.0f), inv_sqrt2, v4f(-0.70710678f)};
     Float3x4 next2 = cov.multiply(axis2);
     v4f lsq2 = length_sq(next2);
@@ -542,12 +544,12 @@ CDM_INLINE Float3x4 compute_principal_axis(const SymMat3x4 &cov)
     next.b = _mm_blendv_ps(next.b.v, next2.b.v, mask1);
     lsq = _mm_blendv_ps(lsq.v, lsq2.v, mask1);
 
-    // Normalize
-    v4f inv_len = _mm_rsqrt_ps(_mm_max_ps(lsq.v, _mm_set1_ps(1e-20f)));
+    __m128 flat_mask = _mm_cmple_ps(lsq.v, degenerate_threshold.v);
+    v4f safe_lsq = _mm_blendv_ps(lsq.v, _mm_set1_ps(1.0f), flat_mask);
+    v4f inv_len = _mm_rsqrt_ps(safe_lsq.v);
     Float3x4 result = next * inv_len;
 
     // Default flat blocks to (1, 0, 0)
-    __m128 flat_mask = _mm_cmplt_ps(lsq.v, _mm_set1_ps(1e-20f));
     result.r = _mm_blendv_ps(result.r.v, _mm_set1_ps(1.0f), flat_mask);
     result.g = _mm_blendv_ps(result.g.v, _mm_setzero_ps(), flat_mask);
     result.b = _mm_blendv_ps(result.b.v, _mm_setzero_ps(), flat_mask);
@@ -702,7 +704,6 @@ namespace bc1
             c0[lane] = encode_rgb565<IsSrgb>({p0r[lane], p0g[lane], p0b[lane]});
             c1[lane] = encode_rgb565<IsSrgb>({p1r[lane], p1g[lane], p1b[lane]});
             if (c0[lane] < c1[lane]) std::swap(c0[lane], c1[lane]);
-            else if (c0[lane] == c1[lane]) { if (c1[lane]) --c1[lane]; else ++c0[lane]; }
         }
 
         PaletteBatch palette = get_palette_x4<IsSrgb, true>(

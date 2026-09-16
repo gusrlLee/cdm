@@ -1,5 +1,6 @@
 #include "mip.h"
 #include "bc1.h"
+#include "bc6h.h"
 
 #include <cuda_runtime.h>
 
@@ -333,6 +334,157 @@ static __global__ void generate_mean_mip(MeanImage source, Block64 *destination,
     encode_block_half_warp<Srgb>(sample, sample_index, destination + output_index);
 }
 
+static __device__ __forceinline__ Color bc6h_quadrant_mean(const bc6h::Block &block, uint32_t quadrant)
+{
+    unsigned mask = half_warp_mask();
+    uint32_t source_lane = (threadIdx.x & 15u) & ~3u;
+    Color means[4] = {};
+    if (quadrant == 0)
+    {
+        Color pixels[16];
+        bc6h::decode_block(block, pixels);
+        for (uint32_t i = 0; i < 16; ++i) pixels[i] = bc6h::sanitize_hdr(pixels[i]);
+        for (uint32_t q = 0; q < 4; ++q)
+        {
+            uint32_t x = (q & 1u) * 2u, y = (q >> 1u) * 2u;
+            means[q] = (pixels[y * 4 + x] + pixels[y * 4 + x + 1] + pixels[(y + 1) * 4 + x]
+                + pixels[(y + 1) * 4 + x + 1]) * 0.25f;
+        }
+    }
+    Color result{};
+    for (uint32_t q = 0; q < 4; ++q)
+    {
+        Color value = means[q];
+        value = {__shfl_sync(mask, value.r, source_lane, 16), __shfl_sync(mask, value.g, source_lane, 16),
+            __shfl_sync(mask, value.b, source_lane, 16)};
+        if (quadrant == q) result = value;
+    }
+    return result;
+}
+
+static __device__ __forceinline__ void encode_bc6h_half_warp(Color sample, uint32_t lane, bc6h::Block *output)
+{
+    unsigned mask = half_warp_mask();
+    sample = bc6h::sanitize_hdr(sample);
+    Color mean;
+    SymMat3 cov = compute_half_warp_moments(sample, mean);
+    Color axis = {1.0f, 0.0f, 0.0f};
+    if (lane == 0) axis = compute_principal_axis(cov);
+    axis = {__shfl_sync(mask, axis.r, 0, 16), __shfl_sync(mask, axis.g, 0, 16),
+        __shfl_sync(mask, axis.b, 0, 16)};
+    float projection = dot(sample - mean, axis);
+    float minimum = min16(projection, mask), maximum = max16(projection, mask);
+    Color p0 = mean + axis * minimum, p1 = mean + axis * maximum;
+    bool degenerate = false;
+    if (lane == 0) degenerate = bc6h::hdr_covariance_degenerate(cov, mean);
+    degenerate = __shfl_sync(mask, degenerate, 0, 16);
+    if (degenerate) p0 = p1 = mean;
+    uint32_t ep[2][3] = {};
+    if (lane == 0)
+    {
+        ep[0][0] = bc6h::quantize_endpoint(p0.r); ep[0][1] = bc6h::quantize_endpoint(p0.g); ep[0][2] = bc6h::quantize_endpoint(p0.b);
+        ep[1][0] = bc6h::quantize_endpoint(p1.r); ep[1][1] = bc6h::quantize_endpoint(p1.g); ep[1][2] = bc6h::quantize_endpoint(p1.b);
+    }
+    for (int e = 0; e < 2; ++e) for (int c = 0; c < 3; ++c) ep[e][c] = __shfl_sync(mask, ep[e][c], 0, 16);
+    Color owned = bc6h::palette_color(ep, lane);
+    float best = 1e30f;
+    uint32_t selector = 0;
+    for (uint32_t s = 0; s < 16; ++s)
+    {
+        Color palette = {__shfl_sync(mask, owned.r, s, 16), __shfl_sync(mask, owned.g, s, 16),
+            __shfl_sync(mask, owned.b, s, 16)};
+        float error = length_sq(sample - palette);
+        if (error < best) { best = error; selector = s; }
+    }
+    bool reverse = __shfl_sync(mask, selector >= 8, 0, 16);
+    if (reverse)
+    {
+        selector = 15u - selector;
+        for (int c = 0; c < 3; ++c) { uint32_t t = ep[0][c]; ep[0][c] = ep[1][c]; ep[1][c] = t; }
+    }
+    uint32_t texel = bc1::texel_index(lane);
+    uint64_t selector_bits = texel == 0 ? uint64_t(selector) << 1 : uint64_t(selector) << (4 * texel);
+    selector_bits |= uint64_t(or16(uint32_t(selector_bits), mask));
+    uint32_t high_half = or16(uint32_t(selector_bits >> 32), mask);
+    if (lane == 0)
+    {
+        uint64_t low = 3u | (uint64_t(ep[0][0]) << 5) | (uint64_t(ep[0][1]) << 15)
+            | (uint64_t(ep[0][2]) << 25) | (uint64_t(ep[1][0]) << 35)
+            | (uint64_t(ep[1][1]) << 45) | (uint64_t(ep[1][2] & 0x1ffu) << 55);
+        uint64_t high = uint64_t(ep[1][2] >> 9) | uint32_t(selector_bits) | (uint64_t(high_half) << 32);
+        *output = {low, high};
+    }
+}
+
+static __global__ void generate_bc6h_base_mip(const bc6h::Block *source, uint32_t source_width, uint32_t source_height,
+    bc6h::Block *destination, uint32_t destination_width, uint32_t destination_height, MeanImage means,
+    uint32_t valid_width, uint32_t valid_height)
+{
+    uint32_t output_index = blockIdx.x * (blockDim.x >> 4) + (threadIdx.x >> 4);
+    if (output_index >= destination_width * destination_height) return;
+    uint32_t lane = threadIdx.x & 15u;
+    unsigned mask = half_warp_mask();
+    uint32_t ox = lane == 0 ? output_index % destination_width : 0;
+    uint32_t oy = lane == 0 ? output_index / destination_width : 0;
+    ox = __shfl_sync(mask, ox, 0, 16); oy = __shfl_sync(mask, oy, 0, 16);
+    uint32_t parent = lane >> 2, quadrant = lane & 3u;
+    uint32_t x0 = clamp_index(ox * 2, source_width), x1 = clamp_index(x0 + 1, source_width);
+    uint32_t y0 = clamp_index(oy * 2, source_height), y1 = clamp_index(y0 + 1, source_height);
+    uint32_t sx = parent & 1u ? x1 : x0, sy = parent & 2u ? y1 : y0;
+    Color sample = bc6h_quadrant_mean(source[sy * source_width + sx], quadrant);
+    Color parent_mean = {sum4(sample.r, mask) * 0.25f, sum4(sample.g, mask) * 0.25f, sum4(sample.b, mask) * 0.25f};
+    bool unique = parent == 0 || (parent == 1 && x1 != x0) || (parent == 2 && y1 != y0)
+        || (parent == 3 && x1 != x0 && y1 != y0);
+    if (quadrant == 0 && unique)
+    {
+        size_t i = size_t(sy) * means.width + sx;
+        means.r[i] = parent_mean.r; means.g[i] = parent_mean.g; means.b[i] = parent_mean.b;
+    }
+    if (valid_width < 4 || valid_height < 4)
+    {
+        uint32_t source_lane = bc1::repeat_small_sample(lane, valid_width, valid_height);
+        sample = {__shfl_sync(mask, sample.r, source_lane, 16), __shfl_sync(mask, sample.g, source_lane, 16),
+            __shfl_sync(mask, sample.b, source_lane, 16)};
+    }
+    encode_bc6h_half_warp(sample, lane, destination + output_index);
+}
+
+static __global__ void generate_bc6h_mean_mip(MeanImage source, bc6h::Block *destination,
+    uint32_t destination_width, uint32_t destination_height, MeanImage next_means,
+    uint32_t valid_width, uint32_t valid_height)
+{
+    uint32_t lane = threadIdx.x & 15u;
+    uint32_t output_index = blockIdx.x * (blockDim.x >> 4) + (threadIdx.x >> 4);
+    if (output_index >= destination_width * destination_height) return;
+    unsigned mask = half_warp_mask();
+    uint32_t local = bc1::texel_index(lane);
+    uint32_t ox = lane == 0 ? output_index % destination_width : 0;
+    uint32_t oy = lane == 0 ? output_index / destination_width : 0;
+    ox = __shfl_sync(mask, ox, 0, 16); oy = __shfl_sync(mask, oy, 0, 16);
+    uint32_t x = clamp_index(ox * 4 + (local & 3u), source.width);
+    uint32_t y = clamp_index(oy * 4 + (local >> 2), source.height);
+    size_t index = size_t(y) * source.width + x;
+    Color sample = {source.r[index], source.g[index], source.b[index]};
+    Color parent_mean = {sum4(sample.r, mask) * 0.25f, sum4(sample.g, mask) * 0.25f, sum4(sample.b, mask) * 0.25f};
+    if (next_means.r && (lane & 3u) == 0)
+    {
+        uint32_t quadrant = lane >> 2, nx = ox * 2 + (quadrant & 1u), ny = oy * 2 + (quadrant >> 1);
+        if (nx < next_means.width && ny < next_means.height)
+        {
+            size_t ni = size_t(ny) * next_means.width + nx;
+            next_means.r[ni] = parent_mean.r; next_means.g[ni] = parent_mean.g; next_means.b[ni] = parent_mean.b;
+        }
+    }
+    if (valid_width < 4 || valid_height < 4)
+    {
+        x = clamp_index(bc1::repeat_small_coordinate(ox * 4 + (local & 3u), valid_width), source.width);
+        y = clamp_index(bc1::repeat_small_coordinate(oy * 4 + (local >> 2), valid_height), source.height);
+        index = size_t(y) * source.width + x;
+        sample = {source.r[index], source.g[index], source.b[index]};
+    }
+    encode_bc6h_half_warp(sample, lane, destination + output_index);
+}
+
 // ---------------------------------------------------------------------
 // Workspace
 // ---------------------------------------------------------------------
@@ -465,6 +617,41 @@ static bool generate_cuda_impl(Image *image, uint8_t *device_data, MeanImage mea
     return true;
 }
 
+static bool generate_bc6h_cuda_impl(Image *image, uint8_t *device_data, MeanImage means, MeanImage scratch)
+{
+    constexpr uint32_t threads = 256;
+    constexpr uint32_t outputs_per_block = threads / 16;
+    for (uint32_t level = 1; level < image->mip_count; ++level)
+    {
+        const MipLevel &previous = image->mips[level - 1];
+        const MipLevel &current = image->mips[level];
+        auto *destination = reinterpret_cast<bc6h::Block *>(device_data + current.byte_offset);
+        uint32_t output_count = current.block_count_x * current.block_count_y;
+        uint32_t blocks = (output_count + outputs_per_block - 1) / outputs_per_block;
+        if (level == 1)
+        {
+            const auto *source = reinterpret_cast<const bc6h::Block *>(device_data + previous.byte_offset);
+            generate_bc6h_base_mip<<<blocks, threads>>>(source, previous.block_count_x, previous.block_count_y,
+                destination, current.block_count_x, current.block_count_y, means, current.width, current.height);
+        }
+        else
+        {
+            MeanImage next_means = {};
+            if (level + 1 < image->mip_count)
+            {
+                scratch.width = (means.width + 1) / 2;
+                scratch.height = (means.height + 1) / 2;
+                next_means = scratch;
+            }
+            generate_bc6h_mean_mip<<<blocks, threads>>>(means, destination, current.block_count_x,
+                current.block_count_y, next_means, current.width, current.height);
+            if (level + 1 < image->mip_count) std::swap(means, scratch);
+        }
+        if (cudaGetLastError() != cudaSuccess) return false;
+    }
+    return true;
+}
+
 // ---------------------------------------------------------------------
 // Public GPU entry point
 // ---------------------------------------------------------------------
@@ -499,9 +686,10 @@ bool generate_mipmaps_cuda(Image *image)
     MeanImage scratch = {g_workspace.scratch.get(), g_workspace.scratch.get() + scratch_count,
                          g_workspace.scratch.get() + scratch_count * 2, scratch_width, scratch_height};
 
-    bool generated = image->is_srgb
-        ? generate_cuda_impl<true>(image, g_workspace.data.get(), means, scratch)
-        : generate_cuda_impl<false>(image, g_workspace.data.get(), means, scratch);
+    bool generated = image->format == Format::BC6H_UF16
+        ? generate_bc6h_cuda_impl(image, g_workspace.data.get(), means, scratch)
+        : (image->is_srgb ? generate_cuda_impl<true>(image, g_workspace.data.get(), means, scratch)
+                          : generate_cuda_impl<false>(image, g_workspace.data.get(), means, scratch));
     const size_t generated_offset = image->mips[1].byte_offset;
     return generated && cudaMemcpy(image->data + generated_offset, g_workspace.data.get() + generated_offset,
                                    image->data_size - generated_offset, cudaMemcpyDeviceToHost) == cudaSuccess;

@@ -1,5 +1,6 @@
 #include "mip.h"
 #include "bc1.h"
+#include "bc6h.h"
 
 #include <algorithm>
 #include <condition_variable>
@@ -290,21 +291,96 @@ static bool generate_cpu(Image *image)
     return true;
 }
 
+template <bool Simd>
+static void process_bc6h_rows(const Image *image, const MipLevel &previous, const MipLevel &current,
+    uint32_t level, bc1::MeanImage &means, uint32_t begin, uint32_t end)
+{
+    const bc6h::Block *source = reinterpret_cast<const bc6h::Block *>(image->data + previous.byte_offset);
+    bc6h::Block *destination = reinterpret_cast<bc6h::Block *>(image->data + current.byte_offset);
+    for (uint32_t by = begin; by < end; ++by)
+    {
+        bc6h::Block *output = destination + size_t(by) * current.block_count_x;
+        if (level >= 2)
+        {
+            if constexpr (Simd)
+                for (uint32_t bx = 0; bx < current.block_count_x; bx += 4)
+                    bc6h::generate_child_blocks_from_means_x4(means, bx, by,
+                        std::min(4u, current.block_count_x - bx), output + bx, current.width, current.height);
+            else
+                for (uint32_t bx = 0; bx < current.block_count_x; ++bx)
+                    output[bx] = bc6h::generate_child_block_from_means_scalar(means, bx, by, current.width, current.height);
+            continue;
+        }
+        uint32_t py0 = by * 2;
+        uint32_t py1 = std::min(py0 + 1, previous.block_count_y - 1);
+        const bc6h::Block *row0 = source + size_t(py0) * previous.block_count_x;
+        const bc6h::Block *row1 = source + size_t(py1) * previous.block_count_x;
+        uint32_t bx = 0;
+        if constexpr (Simd)
+            for (; bx + 3 < current.block_count_x && (bx + 3) * 2 + 1 < previous.block_count_x; bx += 4)
+                bc6h::generate_child_blocks_x4(row0 + bx * 2, row1 + bx * 2, output + bx,
+                    means, bx * 2, py0, py1, current.width, current.height);
+        for (; bx < current.block_count_x; ++bx)
+        {
+            uint32_t px0 = bx * 2;
+            uint32_t px1 = std::min(px0 + 1, previous.block_count_x - 1);
+            Float3 parent_means[4];
+            output[bx] = bc6h::generate_child_block_scalar(row0[px0], row0[px1], row1[px0], row1[px1],
+                parent_means, current.width, current.height);
+            means.set(px0, py0, parent_means[0]);
+            means.set(px1, py0, parent_means[1]);
+            means.set(px0, py1, parent_means[2]);
+            means.set(px1, py1, parent_means[3]);
+        }
+    }
+}
+
+template <bool Simd>
+static bool generate_bc6h_cpu(Image *image)
+{
+    const uint32_t base_width = image->mips[0].block_count_x;
+    const uint32_t base_height = image->mips[0].block_count_y;
+    const size_t base_capacity = size_t(base_width) * base_height;
+    const uint32_t scratch_width = (base_width + 1) / 2;
+    const uint32_t scratch_height = (base_height + 1) / 2;
+    const size_t scratch_capacity = size_t(scratch_width) * scratch_height;
+    std::unique_ptr<float[]> base(new (std::nothrow) float[base_capacity * 3]);
+    std::unique_ptr<float[]> scratch_data(new (std::nothrow) float[scratch_capacity * 3]);
+    if (!base || !scratch_data) return false;
+    bc1::MeanImage means = make_mean_image(base.get(), base_capacity, base_width, base_height);
+    bc1::MeanImage scratch = make_mean_image(scratch_data.get(), scratch_capacity, scratch_width, scratch_height);
+    for (uint32_t level = 1; level < image->mip_count; ++level)
+    {
+        MipLevel previous = image->mips[level - 1], current = image->mips[level];
+        if (level >= 3)
+        {
+            scratch.width = (means.width + 1) / 2;
+            scratch.height = (means.height + 1) / 2;
+            downsample_means<Simd>(means, scratch);
+            std::swap(means, scratch);
+        }
+        auto rows = [image, previous, current, level, &means](uint32_t begin, uint32_t end)
+        { process_bc6h_rows<Simd>(image, previous, current, level, means, begin, end); };
+        g_dispatcher.parallel_rows(current.block_count_y, size_t(current.block_count_x) * current.block_count_y, rows);
+    }
+    return true;
+}
+
 // ---------------------------------------------------------------------
 // Public CPU entry point
 // ---------------------------------------------------------------------
 
 bool generate_mipmaps(Image *image, const Options &options)
 {
-    if (!image || !image->data || image->format != Format::BC1)
+    if (!image || !image->data || image->format == Format::Unknown)
         return false;
 
     switch (options.backend)
     {
     case Backend::CPU:
-        return generate_cpu<false>(image);
+        return image->format == Format::BC1 ? generate_cpu<false>(image) : generate_bc6h_cpu<false>(image);
     case Backend::CPU_SIMD:
-        return generate_cpu<true>(image);
+        return image->format == Format::BC1 ? generate_cpu<true>(image) : generate_bc6h_cpu<true>(image);
     case Backend::CUDA:
         return generate_mipmaps_cuda(image);
     }

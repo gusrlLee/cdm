@@ -10,6 +10,7 @@ add_executable(
     src/mip.h
     src/base.h
     src/bc1.h
+    src/bc6h.h
     src/main.cpp
     src/dds.cpp
     src/cpu.cpp

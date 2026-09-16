@@ -207,13 +207,15 @@ static void process_mip_rows(const Image *image, const MipLevel &previous, const
                 for (uint32_t bx = 0; bx < current.block_count_x; bx += 4)
                 {
                     const uint32_t lanes = std::min(4u, current.block_count_x - bx);
-                    bc1::generate_child_blocks_from_means_x4(means, bx, by, lanes, output + bx, image->is_srgb, current.width, current.height);
+                    bc1::generate_child_blocks_from_means_x4(means, bx, by, lanes, output + bx, image->is_srgb,
+                        current.width, current.height);
                 }
             }
             else
             {
                 for (uint32_t bx = 0; bx < current.block_count_x; ++bx)
-                    output[bx] = bc1::generate_child_block_from_means_scalar(means, bx, by, image->is_srgb, current.width, current.height);
+                    output[bx] = bc1::generate_child_block_from_means_scalar(means, bx, by, image->is_srgb,
+                        current.width, current.height);
             }
             continue;
         }
@@ -223,6 +225,7 @@ static void process_mip_rows(const Image *image, const MipLevel &previous, const
         const Block64 *row0 = source + (size_t)py0 * previous.block_count_x;
         const Block64 *row1 = source + (size_t)py1 * previous.block_count_x;
         uint32_t bx = 0;
+
         if constexpr (Simd)
         {
             for (; bx + 3 < current.block_count_x && (bx + 3) * 2 + 1 < previous.block_count_x; bx += 4)
@@ -278,8 +281,7 @@ static bool generate_cpu(Image *image)
 
         auto process_rows = [image, previous, current, level, &means](uint32_t begin, uint32_t end)
         { process_mip_rows<Simd>(image, previous, current, level, means, begin, end); };
-        g_dispatcher.parallel_rows(current.block_count_y,
-            (size_t)current.block_count_x * current.block_count_y, process_rows);
+        g_dispatcher.parallel_rows(current.block_count_y, (size_t)current.block_count_x * current.block_count_y, process_rows);
     }
     return true;
 }

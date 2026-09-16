@@ -334,7 +334,10 @@ static const float c_srgb_to_linear[256] = {
         std::array<float, MaxValue> result{};
         for (uint32_t i = 0; i < MaxValue; ++i)
         {
-            float s = (float(i) + 0.5f) / float(MaxValue);
+            constexpr uint32_t bits = MaxValue == 31 ? 5 : 6;
+            uint32_t a = (i << (8 - bits)) | (i >> (2 * bits - 8));
+            uint32_t b = ((i + 1) << (8 - bits)) | ((i + 1) >> (2 * bits - 8));
+            float s = float(a + b) * (1.0f / 510.0f);
             result[i] = (s <= 0.04045f) ? (s / 12.92f) : powf((s + 0.055f) / 1.055f, 2.4f);
         }
         return result;
@@ -491,9 +494,82 @@ static const float c_srgb_to_linear[256] = {
             return encode_samples_code_scalar(samples);
     }
 
+    // Experimental fast path: keep fitting in linear RGB, quantize only the two
+    // endpoints, then choose selectors once along the fitted principal axis.
+    template <bool IsSrgb>
+    CDM_INLINE Block64 encode_samples_projection_scalar(const Float3 samples[16])
+    {
+        Float3 mean;
+        SymMat3 cov;
+        compute_child_moments(samples, mean, cov);
+        bool flat = cov.rr + cov.gg + cov.bb < kFlatVarianceEpsilon;
+
+        Float3 axis = compute_principal_axis(cov);
+        float projections[16];
+        float minimum = 1e30f, maximum = -1e30f;
+        for (int i = 0; i < 16; ++i)
+        {
+            float projection = dot(samples[i] - mean, axis);
+            projections[i] = projection;
+            minimum = std::min(minimum, projection);
+            maximum = std::max(maximum, projection);
+        }
+
+        Float3 p0 = clamp01(mean + axis * minimum);
+        Float3 p1 = clamp01(mean + axis * maximum);
+        uint16_t c0 = encode_rgb565_fast<IsSrgb>(p0);
+        uint16_t c1 = encode_rgb565_fast<IsSrgb>(p1);
+        if (c0 < c1) std::swap(c0, c1);
+        else if (c0 == c1) { if (c1) --c1; else ++c0; }
+
+        Float3 palette[4];
+        get_palette_impl<IsSrgb, true>(c0, c1, palette);
+        if (flat)
+        {
+            float best_distance = 1e30f;
+            uint32_t best_selector = 0;
+            for (uint32_t selector = 0; selector < 4; ++selector)
+            {
+                float distance = length_sq(mean - palette[selector]);
+                if (distance < best_distance) { best_distance = distance; best_selector = selector; }
+            }
+            uint32_t indices = 0;
+            for (int i = 0; i < 16; ++i) indices |= best_selector << (2 * texel_map[i]);
+            return {c0, c1, indices};
+        }
+        float palette_projection[4];
+        for (int selector = 0; selector < 4; ++selector)
+            palette_projection[selector] = dot(palette[selector] - mean, axis);
+
+        uint32_t indices = 0;
+        for (int i = 0; i < 16; ++i)
+        {
+            float best_distance = 1e30f;
+            uint32_t best_selector = 0;
+            for (uint32_t selector = 0; selector < 4; ++selector)
+            {
+                float delta = projections[i] - palette_projection[selector];
+                float distance = delta * delta;
+                if (distance < best_distance)
+                {
+                    best_distance = distance;
+                    best_selector = selector;
+                }
+            }
+            indices |= best_selector << (2 * texel_map[i]);
+        }
+        return {c0, c1, indices};
+    }
+
     CDM_INLINE Block64 encode_samples_scalar(const Float3 samples[16], bool is_srgb)
     {
         return is_srgb ? encode_samples_scalar<true>(samples) : encode_samples_scalar<false>(samples);
+    }
+
+    CDM_INLINE Block64 encode_samples_projection_scalar(const Float3 samples[16], bool is_srgb)
+    {
+        return is_srgb ? encode_samples_projection_scalar<true>(samples)
+                       : encode_samples_projection_scalar<false>(samples);
     }
 
     // ---------------------------------------------------------------------
@@ -518,7 +594,7 @@ static const float c_srgb_to_linear[256] = {
                     samples[parent * 4 + 2] + samples[parent * 4 + 3]) * 0.25f;
         }
         repeat_small_samples(samples, valid_width, valid_height);
-        return encode_samples_scalar(samples, is_srgb);
+        return encode_samples_projection_scalar(samples, is_srgb);
     }
 
     // Same as generate_child_block_scalar, but reads its 16 samples directly from the
@@ -535,7 +611,7 @@ static const float c_srgb_to_linear[256] = {
                 repeat_small_coordinate(block_x * 4 + (local & 3u), valid_width ? valid_width : source.width),
                 repeat_small_coordinate(block_y * 4 + (local >> 2), valid_height ? valid_height : source.height));
         }
-        return encode_samples_scalar(samples, is_srgb);
+        return encode_samples_projection_scalar(samples, is_srgb);
     }
 
 #endif
@@ -830,6 +906,62 @@ namespace bc1
             out[lane] = Block64{(uint16_t)c0[lane], (uint16_t)c1[lane], indices[lane]};
     }
 
+    template <bool IsSrgb>
+    CDM_INLINE void pack_projection_blocks_x4(const Float3x4 samples[16], const Float3x4 &mean,
+                                               const Float3x4 &axis, Float3x4 p0, Float3x4 p1,
+                                               __m128 flat_mask, Block64 out[4])
+    {
+        p0 = {clamp01(p0.r), clamp01(p0.g), clamp01(p0.b)};
+        p1 = {clamp01(p1.r), clamp01(p1.g), clamp01(p1.b)};
+        alignas(16) float p0r[4], p0g[4], p0b[4], p1r[4], p1g[4], p1b[4];
+        _mm_store_ps(p0r, p0.r.v); _mm_store_ps(p0g, p0.g.v); _mm_store_ps(p0b, p0.b.v);
+        _mm_store_ps(p1r, p1.r.v); _mm_store_ps(p1g, p1.g.v); _mm_store_ps(p1b, p1.b.v);
+
+        alignas(16) uint32_t c0[4], c1[4];
+        for (int lane = 0; lane < 4; ++lane)
+        {
+            c0[lane] = encode_rgb565_fast<IsSrgb>({p0r[lane], p0g[lane], p0b[lane]});
+            c1[lane] = encode_rgb565_fast<IsSrgb>({p1r[lane], p1g[lane], p1b[lane]});
+            if (c0[lane] < c1[lane]) std::swap(c0[lane], c1[lane]);
+            else if (c0[lane] == c1[lane]) { if (c1[lane]) --c1[lane]; else ++c0[lane]; }
+        }
+
+        PaletteBatch palette = get_palette_x4<IsSrgb, true>(
+            _mm_load_si128((const __m128i *)c0), _mm_load_si128((const __m128i *)c1));
+        v4f palette_projection[4];
+        for (int selector = 0; selector < 4; ++selector)
+            palette_projection[selector] = dot(palette.colors[selector] - mean, axis);
+        bool any_flat = _mm_movemask_ps(flat_mask) != 0;
+
+        __m128i packed_indices = _mm_setzero_si128();
+        for (int i = 0; i < 16; ++i)
+        {
+            v4f projection = dot(samples[i] - mean, axis);
+            v4f best_distance(1e30f);
+            __m128i best_selector = _mm_setzero_si128();
+            for (int selector = 0; selector < 4; ++selector)
+            {
+                v4f delta = projection - palette_projection[selector];
+                v4f distance = delta * delta;
+                if (any_flat)
+                {
+                    v4f rgb_distance = length_sq(samples[i] - palette.colors[selector]);
+                    distance = _mm_blendv_ps(distance.v, rgb_distance.v, flat_mask);
+                }
+                __m128 mask = _mm_cmplt_ps(distance.v, best_distance.v);
+                best_distance = _mm_blendv_ps(best_distance.v, distance.v, mask);
+                best_selector = _mm_blendv_epi8(best_selector, _mm_set1_epi32(selector), _mm_castps_si128(mask));
+            }
+            packed_indices = _mm_or_si128(packed_indices,
+                _mm_sll_epi32(best_selector, _mm_cvtsi32_si128(2 * texel_map[i])));
+        }
+
+        alignas(16) uint32_t indices[4];
+        _mm_store_si128((__m128i *)indices, packed_indices);
+        for (int lane = 0; lane < 4; ++lane)
+            out[lane] = {(uint16_t)c0[lane], (uint16_t)c1[lane], indices[lane]};
+    }
+
     template <bool DecoderQuantization = false>
     CDM_INLINE void encode_samples_code_x4(const Float3x4 samples[16], Block64 *out_blocks)
     {
@@ -924,6 +1056,25 @@ namespace bc1
             encode_samples_code_x4(samples, out_blocks);
     }
 
+    template <bool IsSrgb>
+    CDM_INLINE void encode_samples_projection_x4(const Float3x4 samples[16], Block64 *out_blocks)
+    {
+        Float3x4 mean;
+        SymMat3x4 cov;
+        compute_child_moments(samples, mean, cov);
+        __m128 flat_mask = _mm_cmplt_ps((cov.rr + cov.gg + cov.bb).v, _mm_set1_ps(kFlatVarianceEpsilon));
+        Float3x4 axis = compute_principal_axis(cov);
+        v4f minimum(1e30f), maximum(-1e30f);
+        for (int i = 0; i < 16; ++i)
+        {
+            v4f projection = dot(samples[i] - mean, axis);
+            minimum = _mm_min_ps(minimum.v, projection.v);
+            maximum = _mm_max_ps(maximum.v, projection.v);
+        }
+        pack_projection_blocks_x4<IsSrgb>(samples, mean, axis,
+            mean + axis * minimum, mean + axis * maximum, flat_mask, out_blocks);
+    }
+
     CDM_INLINE Float3x4 block_means_x4(const Float3x4 quadrants[4])
     {
         return (quadrants[0] + quadrants[1] + quadrants[2] + quadrants[3]) * v4f(0.25f);
@@ -959,13 +1110,13 @@ namespace bc1
             store_block_mean_pairs_x4(samples + 8, samples + 12, *means, source_x, source_y1);
         }
         repeat_small_samples(samples, valid_width, valid_height);
-        encode_samples_x4<IsSrgb>(samples, out_blocks);
+        encode_samples_projection_x4<IsSrgb>(samples, out_blocks);
     }
 
     CDM_INLINE void generate_child_blocks_x4(const Block64 *src0, const Block64 *src1, Block64 *out_blocks, bool is_srgb,
-                                              MeanImage *means = nullptr, uint32_t source_x = 0,
-                                              uint32_t source_y0 = 0, uint32_t source_y1 = 0,
-                                              uint32_t valid_width = 4, uint32_t valid_height = 4)
+                                               MeanImage *means = nullptr, uint32_t source_x = 0,
+                                               uint32_t source_y0 = 0, uint32_t source_y1 = 0,
+                                               uint32_t valid_width = 4, uint32_t valid_height = 4)
     {
         if (is_srgb) generate_child_blocks_x4_impl<true>(src0, src1, out_blocks, means, source_x, source_y0, source_y1, valid_width, valid_height);
         else generate_child_blocks_x4_impl<false>(src0, src1, out_blocks, means, source_x, source_y0, source_y1, valid_width, valid_height);
@@ -1013,7 +1164,7 @@ namespace bc1
             }
         }
         Block64 encoded[4];
-        encode_samples_x4<IsSrgb>(samples, encoded);
+        encode_samples_projection_x4<IsSrgb>(samples, encoded);
         for (uint32_t lane = 0; lane < valid_lanes; ++lane)
             destination[lane] = encoded[lane];
     }

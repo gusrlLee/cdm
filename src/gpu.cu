@@ -135,12 +135,12 @@ static __device__ __forceinline__ uint16_t encode_rgb565(Color color)
 }
 
 // Encode one child BC1 block from 16 per-lane samples spread across a half-warp:
-// reduce to mean/covariance, PCA-fit the principal axis, least-squares refine the
-// endpoints, quantize, then have each lane pick its own closest palette selector.
-template <bool Srgb>
+// reduce to mean/covariance, fit the principal axis, quantize endpoints, and assign
+// selectors. The baseline adds LS/full-RGB search; the projection path stays linear.
+template <bool Srgb, bool Projection>
 static __device__ __forceinline__ SymMat3 compute_half_warp_moments(Color &sample, Color parent_mean, Color &mean)
 {
-    if constexpr (Srgb)
+    if constexpr (Srgb && !Projection)
     {
         sample = {linear_to_srgb_code(sample.r), linear_to_srgb_code(sample.g), linear_to_srgb_code(sample.b)};
         const unsigned mask = half_warp_mask();
@@ -165,16 +165,18 @@ static __device__ __forceinline__ SymMat3 compute_half_warp_moments(Color &sampl
     return {rr, gg, bb, rg, rb, gb};
 }
 
-template <bool Srgb>
+template <bool Srgb, bool Projection>
 static __device__ __forceinline__ void encode_block_half_warp(Color sample, Color parent_mean,
                                                             uint32_t sample_index, Block64 *output)
 {
     const unsigned mask = half_warp_mask();
     Color mean;
-    SymMat3 cov = compute_half_warp_moments<Srgb>(sample, parent_mean, mean);
+    SymMat3 cov = compute_half_warp_moments<Srgb, Projection>(sample, parent_mean, mean);
     float rr = cov.rr, gg = cov.gg, bb = cov.bb, rg = cov.rg, rb = cov.rb, gb = cov.gb;
+    bool flat = rr + gg + bb < bc1::kFlatVarianceEpsilon;
     Color p0, p1;
-    if (rr + gg + bb < bc1::kFlatVarianceEpsilon)
+    Color axis = {1.0f, 0.0f, 0.0f};
+    if (flat)
     {
         // Flat block: PCA + least-squares would converge to p0 == p1 == mean anyway.
         p0 = mean;
@@ -182,7 +184,6 @@ static __device__ __forceinline__ void encode_block_half_warp(Color sample, Colo
     }
     else
     {
-        Color axis{};
         if (sample_index == 0)
             axis = compute_principal_axis(SymMat3{rr, gg, bb, rg, rb, gb});
         axis = {__shfl_sync(mask, axis.r, 0, 16), __shfl_sync(mask, axis.g, 0, 16),
@@ -193,25 +194,30 @@ static __device__ __forceinline__ void encode_block_half_warp(Color sample, Colo
         float maximum = max16(projection, mask);
         p0 = mean + axis * minimum;
         p1 = mean + axis * maximum;
-        Color direction = p1 - p0;
-        float inverse_length_sq = 1.0f / (dot(direction, direction) + 1e-12f);
-        float t = fminf(fmaxf(dot(sample - p0, direction) * inverse_length_sq, 0.0f), 1.0f);
-        float weight = rintf(t * 3.0f) * (1.0f / 3.0f);
-        float weight_sum = sum16(weight, mask);
-        float weight_sq_sum = sum16(weight * weight, mask);
-        Color sum = {sum16(sample.r, mask), sum16(sample.g, mask), sum16(sample.b, mask)};
-        Color weighted = {sum16(sample.r * weight, mask), sum16(sample.g * weight, mask), sum16(sample.b * weight, mask)};
-        if (sample_index == 0)
-            solve_least_squares_endpoints(weight_sum, weight_sq_sum, sum, weighted, mean, p0, p1);
-        p0 = {__shfl_sync(mask, p0.r, 0, 16), __shfl_sync(mask, p0.g, 0, 16), __shfl_sync(mask, p0.b, 0, 16)};
-        p1 = {__shfl_sync(mask, p1.r, 0, 16), __shfl_sync(mask, p1.g, 0, 16), __shfl_sync(mask, p1.b, 0, 16)};
+        if constexpr (!Projection)
+        {
+            Color direction = p1 - p0;
+            float inverse_length_sq = 1.0f / (dot(direction, direction) + 1e-12f);
+            float t = fminf(fmaxf(dot(sample - p0, direction) * inverse_length_sq, 0.0f), 1.0f);
+            float weight = rintf(t * 3.0f) * (1.0f / 3.0f);
+            float weight_sum = sum16(weight, mask);
+            float weight_sq_sum = sum16(weight * weight, mask);
+            Color sum = {sum16(sample.r, mask), sum16(sample.g, mask), sum16(sample.b, mask)};
+            Color weighted = {sum16(sample.r * weight, mask), sum16(sample.g * weight, mask), sum16(sample.b * weight, mask)};
+            if (sample_index == 0)
+                solve_least_squares_endpoints(weight_sum, weight_sq_sum, sum, weighted, mean, p0, p1);
+            p0 = {__shfl_sync(mask, p0.r, 0, 16), __shfl_sync(mask, p0.g, 0, 16), __shfl_sync(mask, p0.b, 0, 16)};
+            p1 = {__shfl_sync(mask, p1.r, 0, 16), __shfl_sync(mask, p1.g, 0, 16), __shfl_sync(mask, p1.b, 0, 16)};
+        }
     }
 
     uint32_t c0 = 0, c1 = 0;
     if ((sample_index & 15u) == 0)
     {
-        c0 = Srgb ? bc1::encode_rgb565_code(p0) : encode_rgb565<false>(p0);
-        c1 = Srgb ? bc1::encode_rgb565_code(p1) : encode_rgb565<false>(p1);
+        c0 = Projection ? encode_rgb565<Srgb>(p0)
+                        : (Srgb ? bc1::encode_rgb565_code(p0) : encode_rgb565<false>(p0));
+        c1 = Projection ? encode_rgb565<Srgb>(p1)
+                        : (Srgb ? bc1::encode_rgb565_code(p1) : encode_rgb565<false>(p1));
         if (c0 < c1) { uint32_t swap = c0; c0 = c1; c1 = swap; }
         else if (c0 == c1) { if (c1) --c1; else ++c0; }
     }
@@ -219,17 +225,36 @@ static __device__ __forceinline__ void encode_block_half_warp(Color sample, Colo
     c1 = __shfl_sync(mask, c1, 0, 16);
 
     Color owned_color = sample_index < 4
-        ? palette_color<false, true>((uint16_t)c0, (uint16_t)c1, sample_index)
+        ? (Projection ? palette_color<Srgb, true>((uint16_t)c0, (uint16_t)c1, sample_index)
+                      : palette_color<false, true>((uint16_t)c0, (uint16_t)c1, sample_index))
         : Color{};
     float best_distance = 1e30f;
     uint32_t selector = 0;
+    [[maybe_unused]] float sample_projection = Projection && !flat ? dot(sample - mean, axis) : 0.0f;
     for (uint32_t i = 0; i < 4; ++i)
     {
         Color entry = {__shfl_sync(mask, owned_color.r, i, 16),
                        __shfl_sync(mask, owned_color.g, i, 16),
                        __shfl_sync(mask, owned_color.b, i, 16)};
-        Color delta = sample - entry;
-        float distance = dot(delta, delta);
+        float distance;
+        if constexpr (Projection)
+        {
+            if (flat)
+            {
+                Color delta = sample - entry;
+                distance = dot(delta, delta);
+            }
+            else
+            {
+                float delta = sample_projection - dot(entry - mean, axis);
+                distance = delta * delta;
+            }
+        }
+        else
+        {
+            Color delta = sample - entry;
+            distance = dot(delta, delta);
+        }
         if (distance < best_distance) { best_distance = distance; selector = i; }
     }
     uint32_t indices = or16(selector << (2 * bc1::texel_index(sample_index)), mask);
@@ -243,7 +268,7 @@ static __device__ __forceinline__ void encode_block_half_warp(Color sample, Colo
 
 // Level 1: derive child blocks directly from the base mip's BC1 blocks, and record
 // the mean pyramid's base level along the way.
-template <bool Srgb>
+template <bool Srgb, bool Projection>
 static __global__ void generate_base_mip(const Block64 *source, uint32_t source_width, uint32_t source_height,
                                   Block64 *destination, uint32_t destination_width, uint32_t destination_height,
                                   MeanImage means, uint32_t valid_width, uint32_t valid_height)
@@ -290,11 +315,11 @@ static __global__ void generate_base_mip(const Block64 *source, uint32_t source_
                   __shfl_sync(mask, sample.b, lane, 16)};
         parent_mean = {sum4(sample.r, mask) * .25f, sum4(sample.g, mask) * .25f, sum4(sample.b, mask) * .25f};
     }
-    encode_block_half_warp<Srgb>(sample, parent_mean, sample_index, destination + output_index);
+    encode_block_half_warp<Srgb, Projection>(sample, parent_mean, sample_index, destination + output_index);
 }
 
 // Level 2+: derive child blocks from the mean pyramid AND emit next mip's means on the fly!
-template <bool Srgb>
+template <bool Srgb, bool Projection>
 static __global__ void generate_mean_mip(MeanImage source, Block64 *destination,
                                   uint32_t destination_width, uint32_t destination_height,
                                   MeanImage next_means, uint32_t valid_width, uint32_t valid_height)
@@ -343,7 +368,7 @@ static __global__ void generate_mean_mip(MeanImage source, Block64 *destination,
         sample = {source.r[index], source.g[index], source.b[index]};
         parent_mean = {sum4(sample.r, mask) * .25f, sum4(sample.g, mask) * .25f, sum4(sample.b, mask) * .25f};
     }
-    encode_block_half_warp<Srgb>(sample, parent_mean, sample_index, destination + output_index);
+    encode_block_half_warp<Srgb, Projection>(sample, parent_mean, sample_index, destination + output_index);
 }
 
 // Halve the mean pyramid's resolution for levels beyond 2.
@@ -412,7 +437,10 @@ static std::array<float, MaxValue> make_srgb_quantize_thresholds()
     std::array<float, MaxValue> values{};
     for (size_t i = 0; i < values.size(); ++i)
     {
-        float s = (float(i) + 0.5f) / float(MaxValue);
+        constexpr uint32_t bits = MaxValue == 31 ? 5 : 6;
+        uint32_t a = (uint32_t(i) << (8 - bits)) | (uint32_t(i) >> (2 * bits - 8));
+        uint32_t b = ((uint32_t(i) + 1) << (8 - bits)) | ((uint32_t(i) + 1) >> (2 * bits - 8));
+        float s = float(a + b) * (1.0f / 510.0f);
         values[i] = s <= 0.04045f ? s / 12.92f : std::pow((s + 0.055f) / 1.055f, 2.4f);
     }
     return values;
@@ -453,7 +481,7 @@ static CudaWorkspace g_workspace;
 // Kernel launch
 // ---------------------------------------------------------------------
 
-template <bool Srgb>
+template <bool Srgb, bool Projection>
 static bool generate_cuda_impl(Image *image, uint8_t *device_data, MeanImage means, MeanImage scratch)
 {
     constexpr uint32_t threads = 256;
@@ -469,7 +497,7 @@ static bool generate_cuda_impl(Image *image, uint8_t *device_data, MeanImage mea
         if (level == 1)
         {
             const auto *source = reinterpret_cast<const Block64 *>(device_data + previous.byte_offset);
-            generate_base_mip<Srgb><<<blocks, threads>>>(source, previous.block_count_x, previous.block_count_y,
+            generate_base_mip<Srgb, Projection><<<blocks, threads>>>(source, previous.block_count_x, previous.block_count_y,
                 destination, current.block_count_x, current.block_count_y, means, current.width, current.height);
         }
         else
@@ -482,7 +510,7 @@ static bool generate_cuda_impl(Image *image, uint8_t *device_data, MeanImage mea
                 next_means = scratch;
             }
 
-            generate_mean_mip<Srgb><<<blocks, threads>>>(means, destination, current.block_count_x, current.block_count_y,
+            generate_mean_mip<Srgb, Projection><<<blocks, threads>>>(means, destination, current.block_count_x, current.block_count_y,
                 next_means, current.width, current.height);
 
             if (level + 1 < image->mip_count)
@@ -531,8 +559,8 @@ bool generate_mipmaps_cuda(Image *image)
                          g_workspace.scratch.get() + scratch_count * 2, scratch_width, scratch_height};
 
     bool generated = image->is_srgb
-        ? generate_cuda_impl<true>(image, g_workspace.data.get(), means, scratch)
-        : generate_cuda_impl<false>(image, g_workspace.data.get(), means, scratch);
+        ? generate_cuda_impl<true, true>(image, g_workspace.data.get(), means, scratch)
+        : generate_cuda_impl<false, true>(image, g_workspace.data.get(), means, scratch);
     const size_t generated_offset = image->mips[1].byte_offset;
     return generated && cudaMemcpy(image->data + generated_offset, g_workspace.data.get() + generated_offset,
                                    image->data_size - generated_offset, cudaMemcpyDeviceToHost) == cudaSuccess;

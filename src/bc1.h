@@ -60,6 +60,29 @@ namespace bc1
         return y * 4 + x;
     }
 
+    CDM_INLINE uint32_t repeat_small_coordinate(uint32_t value, uint32_t valid)
+    {
+        return valid < 4 ? value % valid : value;
+    }
+
+    CDM_INLINE uint32_t repeat_small_sample(uint32_t sample, uint32_t width, uint32_t height)
+    {
+        uint32_t texel = texel_index(sample);
+        uint32_t x = repeat_small_coordinate(texel & 3u, width);
+        uint32_t y = repeat_small_coordinate(texel >> 2, height);
+        return ((y >> 1) * 2 + (x >> 1)) * 4 + (y & 1u) * 2 + (x & 1u);
+    }
+
+    template <typename T>
+    CDM_INLINE void repeat_small_samples(Vec3T<T> samples[16], uint32_t width, uint32_t height)
+    {
+        if (width >= 4 && height >= 4) return;
+        Vec3T<T> original[16];
+        for (uint32_t i = 0; i < 16; ++i) original[i] = samples[i];
+        for (uint32_t i = 0; i < 16; ++i)
+            samples[i] = original[repeat_small_sample(i, width, height)];
+    }
+
     struct Rgb8
     {
         uint32_t r, g, b;
@@ -480,7 +503,8 @@ static const float c_srgb_to_linear[256] = {
     // Combine four BC1 parent blocks (2x2) into one child block, one mip level down.
     CDM_INLINE Block64 generate_child_block_scalar(const Block64 &p00, const Block64 &p10,
                                              const Block64 &p01, const Block64 &p11, bool is_srgb,
-                                             Float3 parent_means[4] = nullptr)
+                                             Float3 parent_means[4] = nullptr,
+                                             uint32_t valid_width = 4, uint32_t valid_height = 4)
     {
         Float3 samples[16];
         get_quadrant_means_scalar(p00, is_srgb, samples + 0);
@@ -493,19 +517,23 @@ static const float c_srgb_to_linear[256] = {
                 parent_means[parent] = (samples[parent * 4] + samples[parent * 4 + 1] +
                     samples[parent * 4 + 2] + samples[parent * 4 + 3]) * 0.25f;
         }
+        repeat_small_samples(samples, valid_width, valid_height);
         return encode_samples_scalar(samples, is_srgb);
     }
 
     // Same as generate_child_block_scalar, but reads its 16 samples directly from the
     // mean pyramid instead of re-decoding BC1 blocks (used from mip level 2 onward).
     CDM_INLINE Block64 generate_child_block_from_means_scalar(const MeanImage &source, uint32_t block_x,
-                                                        uint32_t block_y, bool is_srgb)
+                                                        uint32_t block_y, bool is_srgb,
+                                                        uint32_t valid_width = 0, uint32_t valid_height = 0)
     {
         Float3 samples[16];
         for (uint32_t i = 0; i < 16; ++i)
         {
             uint32_t local = texel_map[i];
-            samples[i] = source.get(block_x * 4 + (local & 3u), block_y * 4 + (local >> 2));
+            samples[i] = source.get(
+                repeat_small_coordinate(block_x * 4 + (local & 3u), valid_width ? valid_width : source.width),
+                repeat_small_coordinate(block_y * 4 + (local >> 2), valid_height ? valid_height : source.height));
         }
         return encode_samples_scalar(samples, is_srgb);
     }
@@ -917,7 +945,8 @@ namespace bc1
     // GenerateChild (SIMD): combine two rows of 2x4 parent blocks into four child blocks.
     template <bool IsSrgb>
     CDM_INLINE void generate_child_blocks_x4_impl(const Block64 *src0, const Block64 *src1, Block64 *out_blocks,
-                                                   MeanImage *means, uint32_t source_x, uint32_t source_y0, uint32_t source_y1)
+                                                   MeanImage *means, uint32_t source_x, uint32_t source_y0, uint32_t source_y1,
+                                                   uint32_t valid_width, uint32_t valid_height)
     {
         Float3x4 samples[16];
         get_quadrant_means_x4<IsSrgb>(src0[0], src0[2], src0[4], src0[6], samples + 0);
@@ -929,15 +958,17 @@ namespace bc1
             store_block_mean_pairs_x4(samples + 0, samples + 4, *means, source_x, source_y0);
             store_block_mean_pairs_x4(samples + 8, samples + 12, *means, source_x, source_y1);
         }
+        repeat_small_samples(samples, valid_width, valid_height);
         encode_samples_x4<IsSrgb>(samples, out_blocks);
     }
 
     CDM_INLINE void generate_child_blocks_x4(const Block64 *src0, const Block64 *src1, Block64 *out_blocks, bool is_srgb,
                                               MeanImage *means = nullptr, uint32_t source_x = 0,
-                                              uint32_t source_y0 = 0, uint32_t source_y1 = 0)
+                                              uint32_t source_y0 = 0, uint32_t source_y1 = 0,
+                                              uint32_t valid_width = 4, uint32_t valid_height = 4)
     {
-        if (is_srgb) generate_child_blocks_x4_impl<true>(src0, src1, out_blocks, means, source_x, source_y0, source_y1);
-        else generate_child_blocks_x4_impl<false>(src0, src1, out_blocks, means, source_x, source_y0, source_y1);
+        if (is_srgb) generate_child_blocks_x4_impl<true>(src0, src1, out_blocks, means, source_x, source_y0, source_y1, valid_width, valid_height);
+        else generate_child_blocks_x4_impl<false>(src0, src1, out_blocks, means, source_x, source_y0, source_y1, valid_width, valid_height);
     }
 
     // Same as generate_child_blocks_x4, but reads its 16 samples directly from the mean
@@ -946,10 +977,11 @@ namespace bc1
     template <bool IsSrgb>
     CDM_INLINE void generate_child_blocks_from_means_x4(const MeanImage &source,
                                                          uint32_t block_x, uint32_t block_y, uint32_t valid_lanes,
-                                                         Block64 *destination)
+                                                         Block64 *destination, uint32_t valid_width = 0, uint32_t valid_height = 0)
     {
         Float3x4 samples[16];
-        if (valid_lanes == 4 && (block_x + 4) * 4 <= source.width && (block_y + 1) * 4 <= source.height)
+        if ((!valid_width || valid_width >= 4) && (!valid_height || valid_height >= 4)
+            && valid_lanes == 4 && (block_x + 4) * 4 <= source.width && (block_y + 1) * 4 <= source.height)
         {
             for (uint32_t i = 0; i < 16; ++i)
             {
@@ -970,7 +1002,9 @@ namespace bc1
                 for (uint32_t j = 0; j < 4; ++j)
                 {
                     uint32_t lane_x = block_x + std::min(j, valid_lanes - 1);
-                    lane[j] = source.get(lane_x * 4 + (local & 3u), block_y * 4 + (local >> 2));
+                    lane[j] = source.get(
+                        repeat_small_coordinate(lane_x * 4 + (local & 3u), valid_width ? valid_width : source.width),
+                        repeat_small_coordinate(block_y * 4 + (local >> 2), valid_height ? valid_height : source.height));
                 }
                 samples[i] = {
                     _mm_set_ps(lane[3].r, lane[2].r, lane[1].r, lane[0].r),
@@ -986,10 +1020,11 @@ namespace bc1
 
     CDM_INLINE void generate_child_blocks_from_means_x4(const MeanImage &source,
                                                          uint32_t block_x, uint32_t block_y, uint32_t valid_lanes,
-                                                         Block64 *destination, bool is_srgb)
+                                                         Block64 *destination, bool is_srgb,
+                                                         uint32_t valid_width = 0, uint32_t valid_height = 0)
     {
-        if (is_srgb) generate_child_blocks_from_means_x4<true>(source, block_x, block_y, valid_lanes, destination);
-        else generate_child_blocks_from_means_x4<false>(source, block_x, block_y, valid_lanes, destination);
+        if (is_srgb) generate_child_blocks_from_means_x4<true>(source, block_x, block_y, valid_lanes, destination, valid_width, valid_height);
+        else generate_child_blocks_from_means_x4<false>(source, block_x, block_y, valid_lanes, destination, valid_width, valid_height);
     }
 }
 

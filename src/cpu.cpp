@@ -207,13 +207,13 @@ static void process_mip_rows(const Image *image, const MipLevel &previous, const
                 for (uint32_t bx = 0; bx < current.block_count_x; bx += 4)
                 {
                     const uint32_t lanes = std::min(4u, current.block_count_x - bx);
-                    bc1::generate_child_blocks_from_means_x4(means, bx, by, lanes, output + bx, image->is_srgb);
+                    bc1::generate_child_blocks_from_means_x4(means, bx, by, lanes, output + bx, image->is_srgb, current.width, current.height);
                 }
             }
             else
             {
                 for (uint32_t bx = 0; bx < current.block_count_x; ++bx)
-                    output[bx] = bc1::generate_child_block_from_means_scalar(means, bx, by, image->is_srgb);
+                    output[bx] = bc1::generate_child_block_from_means_scalar(means, bx, by, image->is_srgb, current.width, current.height);
             }
             continue;
         }
@@ -227,7 +227,7 @@ static void process_mip_rows(const Image *image, const MipLevel &previous, const
         {
             for (; bx + 3 < current.block_count_x && (bx + 3) * 2 + 1 < previous.block_count_x; bx += 4)
                 bc1::generate_child_blocks_x4(row0 + bx * 2, row1 + bx * 2, output + bx,
-                    image->is_srgb, &means, bx * 2, py0, py1);
+                    image->is_srgb, &means, bx * 2, py0, py1, current.width, current.height);
         }
         for (; bx < current.block_count_x; ++bx)
         {
@@ -235,7 +235,7 @@ static void process_mip_rows(const Image *image, const MipLevel &previous, const
             const uint32_t px1 = std::min(px0 + 1, previous.block_count_x - 1);
             Float3 parent_means[4];
             output[bx] = bc1::generate_child_block_scalar(row0[px0], row0[px1], row1[px0], row1[px1],
-                                                   image->is_srgb, parent_means);
+                                                   image->is_srgb, parent_means, current.width, current.height);
             means.set(px0, py0, parent_means[0]);
             means.set(px1, py0, parent_means[1]);
             means.set(px0, py1, parent_means[2]);

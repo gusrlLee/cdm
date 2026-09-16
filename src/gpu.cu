@@ -246,7 +246,7 @@ static __device__ __forceinline__ void encode_block_half_warp(Color sample, Colo
 template <bool Srgb>
 static __global__ void generate_base_mip(const Block64 *source, uint32_t source_width, uint32_t source_height,
                                   Block64 *destination, uint32_t destination_width, uint32_t destination_height,
-                                  MeanImage means)
+                                  MeanImage means, uint32_t valid_width, uint32_t valid_height)
 {
     uint32_t output_index = blockIdx.x * (blockDim.x >> 4) + (threadIdx.x >> 4);
     uint32_t output_count = destination_width * destination_height;
@@ -283,6 +283,13 @@ static __global__ void generate_base_mip(const Block64 *source, uint32_t source_
         means.g[index] = parent_mean.g;
         means.b[index] = parent_mean.b;
     }
+    if (valid_width < 4 || valid_height < 4)
+    {
+        uint32_t lane = bc1::repeat_small_sample(sample_index, valid_width, valid_height);
+        sample = {__shfl_sync(mask, sample.r, lane, 16), __shfl_sync(mask, sample.g, lane, 16),
+                  __shfl_sync(mask, sample.b, lane, 16)};
+        parent_mean = {sum4(sample.r, mask) * .25f, sum4(sample.g, mask) * .25f, sum4(sample.b, mask) * .25f};
+    }
     encode_block_half_warp<Srgb>(sample, parent_mean, sample_index, destination + output_index);
 }
 
@@ -290,7 +297,7 @@ static __global__ void generate_base_mip(const Block64 *source, uint32_t source_
 template <bool Srgb>
 static __global__ void generate_mean_mip(MeanImage source, Block64 *destination,
                                   uint32_t destination_width, uint32_t destination_height,
-                                  MeanImage next_means = {})
+                                  MeanImage next_means, uint32_t valid_width, uint32_t valid_height)
 {
     uint32_t sample_index = threadIdx.x & 15u;
     uint32_t output_index = blockIdx.x * (blockDim.x >> 4) + (threadIdx.x >> 4);
@@ -327,6 +334,15 @@ static __global__ void generate_mean_mip(MeanImage source, Block64 *destination,
         }
     }
 
+    // Repeat only encoder inputs; the next linear means above retain their original box calculation.
+    if (valid_width < 4 || valid_height < 4)
+    {
+        x = clamp_index(bc1::repeat_small_coordinate(output_x * 4 + (local & 3u), valid_width), source.width);
+        y = clamp_index(bc1::repeat_small_coordinate(output_y * 4 + (local >> 2), valid_height), source.height);
+        index = (size_t)y * source.width + x;
+        sample = {source.r[index], source.g[index], source.b[index]};
+        parent_mean = {sum4(sample.r, mask) * .25f, sum4(sample.g, mask) * .25f, sum4(sample.b, mask) * .25f};
+    }
     encode_block_half_warp<Srgb>(sample, parent_mean, sample_index, destination + output_index);
 }
 
@@ -454,7 +470,7 @@ static bool generate_cuda_impl(Image *image, uint8_t *device_data, MeanImage mea
         {
             const auto *source = reinterpret_cast<const Block64 *>(device_data + previous.byte_offset);
             generate_base_mip<Srgb><<<blocks, threads>>>(source, previous.block_count_x, previous.block_count_y,
-                destination, current.block_count_x, current.block_count_y, means);
+                destination, current.block_count_x, current.block_count_y, means, current.width, current.height);
         }
         else
         {
@@ -466,7 +482,8 @@ static bool generate_cuda_impl(Image *image, uint8_t *device_data, MeanImage mea
                 next_means = scratch;
             }
 
-            generate_mean_mip<Srgb><<<blocks, threads>>>(means, destination, current.block_count_x, current.block_count_y, next_means);
+            generate_mean_mip<Srgb><<<blocks, threads>>>(means, destination, current.block_count_x, current.block_count_y,
+                next_means, current.width, current.height);
 
             if (level + 1 < image->mip_count)
             {

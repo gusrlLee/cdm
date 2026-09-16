@@ -26,3 +26,5 @@ T2 compares complete non-sRGB files byte for byte; repeat for every backend. T3 
 See [results.md](results.md) for measured build, correctness, SSE and timing results. Before measurements use the original linear encoder at Git HEAD 882dea3, not the intermediate weighted-candidate implementation.
 
 Latest decoder-midpoint changes: see [decoder-results.md](decoder-results.md) for T1-T5, including all backend pairs. The CUDA test compares 10,000 random blocks against scalar compute_child_moments; the CPU test also checks quantization against exhaustive decoded values.
+
+The separate small-level padding change is tested in the same CPU/CUDA programs (dimensions 1..4, both transfer modes). T2 applies to the preceding quantization commit only; see decoder-results.md for the separate padding results.

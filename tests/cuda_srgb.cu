@@ -19,6 +19,92 @@ static __global__ void check_moments(const Color *input, SymMat3 *output)
     if (lane == 0) output[block] = covariance;
 }
 
+template <bool Srgb>
+static __global__ void reference_small_mean(MeanImage source, unsigned w, unsigned h, Block64 *output)
+{
+    unsigned i = threadIdx.x;
+    unsigned local = bc1::texel_index(i);
+    unsigned index = ((local / 4) % h) * source.width + ((local % 4) % w);
+    Color sample{source.r[index], source.g[index], source.b[index]};
+    unsigned mask = half_warp_mask();
+    Color parent{sum4(sample.r, mask) * .25f, sum4(sample.g, mask) * .25f, sum4(sample.b, mask) * .25f};
+    encode_block_half_warp<Srgb>(sample, parent, i, output);
+}
+
+template <bool Srgb>
+static __global__ void reference_small_base(const Block64 *source, unsigned w, unsigned h, Block64 *output)
+{
+    unsigned i = threadIdx.x, local = bc1::texel_index(i);
+    unsigned x = (local % 4) % w, y = (local / 4) % h;
+    Block64 block = source[(y / 2) * 2 + x / 2];
+    unsigned shift = (y % 2) * 16 + (x % 2) * 4;
+    Color sample{};
+    for (unsigned selector = 0; selector < 4; ++selector)
+        sample += palette_color<Srgb>(block.c0, block.c1, selector)
+            * (float((bc1::selector_region_counts(block.indices, selector) >> shift) & 15) * .25f);
+    unsigned mask = half_warp_mask();
+    Color parent{sum4(sample.r, mask) * .25f, sum4(sample.g, mask) * .25f, sum4(sample.b, mask) * .25f};
+    encode_block_half_warp<Srgb>(sample, parent, i, output);
+}
+
+static void check_small_levels()
+{
+    float values[48];
+    for (unsigned i = 0; i < 48; ++i) values[i] = ((i * 7) % 47) / 47.f;
+    DeviceBuffer<float> input, next;
+    DeviceBuffer<Block64> blocks;
+    DeviceBuffer<Block64> base;
+    Block64 parents[4] = {{0xffff, 0, 0x1b1b1b1b}, {0xf800, 0, 0x12345678},
+                         {0x07e0, 0, 0x76543210}, {0x001f, 0, 0xabcdef01}};
+    assert(input.allocate(48) && next.allocate(12) && blocks.allocate(2) && base.allocate(4));
+    assert(cudaMemcpy(base.get(), parents, sizeof(parents), cudaMemcpyHostToDevice) == cudaSuccess);
+    assert(cudaMemcpy(input.get(), values, sizeof(values), cudaMemcpyHostToDevice) == cudaSuccess);
+    MeanImage source{input.get(), input.get()+16, input.get()+32, 4, 4};
+    MeanImage destination{next.get(), next.get()+4, next.get()+8, 2, 2};
+    for (unsigned h = 1; h <= 4; ++h)
+        for (unsigned w = 1; w <= 4; ++w)
+            for (bool srgb : {false, true})
+            {
+                if (srgb)
+                {
+                    generate_mean_mip<true><<<1,16>>>(source, blocks.get(), 1, 1, destination, w, h);
+                    reference_small_mean<true><<<1,16>>>(source, w, h, blocks.get()+1);
+                }
+                else
+                {
+                    generate_mean_mip<false><<<1,16>>>(source, blocks.get(), 1, 1, destination, w, h);
+                    reference_small_mean<false><<<1,16>>>(source, w, h, blocks.get()+1);
+                }
+                assert(cudaGetLastError() == cudaSuccess);
+                Block64 result[2];
+                assert(cudaMemcpy(result, blocks.get(), sizeof(result), cudaMemcpyDeviceToHost) == cudaSuccess);
+                assert(result[0].c0 == result[1].c0 && result[0].c1 == result[1].c1 && result[0].indices == result[1].indices);
+                float stored[12];
+                assert(cudaMemcpy(stored, next.get(), sizeof(stored), cudaMemcpyDeviceToHost) == cudaSuccess);
+                for (unsigned c = 0; c < 3; ++c)
+                    for (unsigned q = 0; q < 4; ++q)
+                    {
+                        unsigned i = c*16 + (q/2)*8 + (q%2)*2;
+                        float expected = (values[i]+values[i+1]+values[i+4]+values[i+5])*.25f;
+                        assert(std::abs(stored[c*4+q]-expected) < 1e-7f);
+                    }
+                if (srgb)
+                {
+                    generate_base_mip<true><<<1,16>>>(base.get(), 2, 2, blocks.get(), 1, 1, destination, w, h);
+                    reference_small_base<true><<<1,16>>>(base.get(), w, h, blocks.get()+1);
+                }
+                else
+                {
+                    generate_base_mip<false><<<1,16>>>(base.get(), 2, 2, blocks.get(), 1, 1, destination, w, h);
+                    reference_small_base<false><<<1,16>>>(base.get(), w, h, blocks.get()+1);
+                }
+                assert(cudaGetLastError() == cudaSuccess);
+                assert(cudaMemcpy(result, blocks.get(), sizeof(result), cudaMemcpyDeviceToHost) == cudaSuccess);
+                assert(result[0].c0 == result[1].c0 && result[0].c1 == result[1].c1 && result[0].indices == result[1].indices);
+            }
+    std::puts("PASS: CUDA small levels 1..4 in both modes; linear next means unchanged");
+}
+
 static __global__ void check_encoder(Block64 *output, float *error)
 {
     unsigned i = threadIdx.x;
@@ -42,6 +128,7 @@ static __global__ void check_encoder(Block64 *output, float *error)
 int main()
 {
     assert(initialize_tables());
+    check_small_levels();
     DeviceBuffer<Block64> block;
     DeviceBuffer<float> error;
     assert(block.allocate(1) && error.allocate(1));

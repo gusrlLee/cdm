@@ -49,6 +49,47 @@ int main()
 {
     check_quantizer<5>();
     check_quantizer<6>();
+    // Small levels: explicit modulo coordinates, both transfer modes and both CPU paths.
+    float r[16], g[16], b[16];
+    for (unsigned i = 0; i < 16; ++i) { r[i] = i / 16.f; g[i] = (15 - i) / 16.f; b[i] = (i % 5) / 5.f; }
+    bc1::MeanImage means{r, g, b, 4, 4};
+    for (unsigned h = 1; h <= 4; ++h)
+        for (unsigned w = 1; w <= 4; ++w)
+            for (bool srgb : {false, true})
+            {
+                Float3 reference[16];
+                Float3x4 reference_batch[16];
+                for (unsigned i = 0; i < 16; ++i)
+                {
+                    unsigned local = bc1::texel_map[i];
+                    reference[i] = means.get((local % 4) % w, (local / 4) % h);
+                    reference_batch[i] = {v4f(reference[i].r), v4f(reference[i].g), v4f(reference[i].b)};
+                }
+                Block64 expected = bc1::encode_samples_scalar(reference, srgb);
+                Block64 actual = bc1::generate_child_block_from_means_scalar(means, 0, 0, srgb, w, h);
+                assert(std::memcmp(&expected, &actual, sizeof(actual)) == 0);
+                Block64 expected_batch[4];
+                if (srgb) bc1::encode_samples_x4<true>(reference_batch, expected_batch);
+                else bc1::encode_samples_x4<false>(reference_batch, expected_batch);
+                bc1::generate_child_blocks_from_means_x4(means, 0, 0, 1, &actual, srgb, w, h);
+                assert(std::memcmp(&expected_batch[0], &actual, sizeof(actual)) == 0);
+                // Level 1 must repeat samples only after recording the original parent means.
+                Block64 parents[4] = {{0xffff, 0, 0x1b1b1b1b}, {0xf800, 0, 0x12345678},
+                                      {0x07e0, 0, 0x76543210}, {0x001f, 0, 0xabcdef01}};
+                Float3 original[16], stored[4];
+                for (unsigned p = 0; p < 4; ++p)
+                    bc1::get_quadrant_means_scalar(parents[p], srgb, original + p * 4);
+                for (unsigned i = 0; i < 16; ++i)
+                    reference[i] = original[bc1::repeat_small_sample(i, w, h)];
+                expected = bc1::encode_samples_scalar(reference, srgb);
+                actual = bc1::generate_child_block_scalar(parents[0], parents[1], parents[2], parents[3], srgb, stored, w, h);
+                assert(std::memcmp(&expected, &actual, sizeof(actual)) == 0);
+                for (unsigned p = 0; p < 4; ++p)
+                {
+                    Float3 mean = (original[p*4] + original[p*4+1] + original[p*4+2] + original[p*4+3]) * .25f;
+                    assert(length_sq(mean - stored[p]) == 0);
+                }
+            }
     Float3 samples[16], code[16];
     Float3x4 batch[16];
     for (int i = 0; i < 16; ++i)

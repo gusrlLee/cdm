@@ -66,3 +66,13 @@ Mip-0 is decoded with bit replication and opaque integer floor interpolation (D)
 | 9 | 0.00473299307755 | 0.00473299307755 | 0.00119049629219 | 0.00119049629219 |
 | 10 | 0.000999641178594 | 0.000999641178594 | 0.000288340321429 | 0.000288340321429 |
 | 11 | 0.000127832863998 | 0.000127832863998 | 3.57933458856e-05 | 3.57933458856e-05 |
+
+## Separate small-level padding commit
+
+Encoder sample coordinates use x % valid_width / y % valid_height on axes with fewer than four texels, for both Level 1 and mean-pyramid inputs in all three backends. Original quadrant means and pyramid storage/downsampling remain unchanged. GPU computes original next-level means before repeating encoder samples.
+
+- Scalar/SIMD and CUDA checks cover widths/heights 1 through 4, both sRGB and non-sRGB. CUDA checks both base and mean kernels against explicit modulo references. Stored linear means are also checked.
+- On test.dds, this separate change modifies 4 file bytes per sRGB backend and 5 per non-sRGB backend. These changes are excluded from T2 above.
+- Final backend differing-byte counts remain CPU/SIMD 109, CPU/CUDA 618, SIMD/CUDA 705.
+- All final per-level SSE values are identical to the T3 tables above on this input; only padding selectors changed.
+- Modulo gives equal repetition for valid extents 1 and 2. For extent 3, four slots necessarily repeat one coordinate twice (2:1:1); the requested modulo rule is implemented without introducing weights.

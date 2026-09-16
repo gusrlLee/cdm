@@ -138,11 +138,18 @@ static __device__ __forceinline__ uint16_t encode_rgb565(Color color)
 // reduce to mean/covariance, PCA-fit the principal axis, least-squares refine the
 // endpoints, quantize, then have each lane pick its own closest palette selector.
 template <bool Srgb>
-static __device__ __forceinline__ void encode_block_half_warp(Color sample, Color parent_mean,
-                                                        uint32_t sample_index, Block64 *output)
+static __device__ __forceinline__ SymMat3 compute_half_warp_moments(Color &sample, Color parent_mean, Color &mean)
 {
+    if constexpr (Srgb)
+    {
+        sample = {linear_to_srgb_code(sample.r), linear_to_srgb_code(sample.g), linear_to_srgb_code(sample.b)};
+        const unsigned mask = half_warp_mask();
+        // Local fitting statistic only; never written to the linear mean pyramid.
+        parent_mean = {sum4(sample.r, mask) * 0.25f, sum4(sample.g, mask) * 0.25f,
+                       sum4(sample.b, mask) * 0.25f};
+    }
     const unsigned mask = half_warp_mask();
-    Color mean = {sum16(sample.r, mask) * (1.0f / 16.0f),
+    mean = {sum16(sample.r, mask) * (1.0f / 16.0f),
                   sum16(sample.g, mask) * (1.0f / 16.0f),
                   sum16(sample.b, mask) * (1.0f / 16.0f)};
 
@@ -155,6 +162,17 @@ static __device__ __forceinline__ void encode_block_half_warp(Color sample, Colo
     float rb = sum16(within.r * within.b + between.r * between.b, mask) * (1.0f / 16.0f);
     float gb = sum16(within.g * within.b + between.g * between.b, mask) * (1.0f / 16.0f);
 
+    return {rr, gg, bb, rg, rb, gb};
+}
+
+template <bool Srgb>
+static __device__ __forceinline__ void encode_block_half_warp(Color sample, Color parent_mean,
+                                                            uint32_t sample_index, Block64 *output)
+{
+    const unsigned mask = half_warp_mask();
+    Color mean;
+    SymMat3 cov = compute_half_warp_moments<Srgb>(sample, parent_mean, mean);
+    float rr = cov.rr, gg = cov.gg, bb = cov.bb, rg = cov.rg, rb = cov.rb, gb = cov.gb;
     Color p0, p1;
     if (rr + gg + bb < bc1::kFlatVarianceEpsilon)
     {
@@ -192,8 +210,8 @@ static __device__ __forceinline__ void encode_block_half_warp(Color sample, Colo
     uint32_t c0 = 0, c1 = 0;
     if ((sample_index & 15u) == 0)
     {
-        c0 = encode_rgb565<Srgb>(p0);
-        c1 = encode_rgb565<Srgb>(p1);
+        c0 = Srgb ? bc1::encode_rgb565_code(p0) : encode_rgb565<false>(p0);
+        c1 = Srgb ? bc1::encode_rgb565_code(p1) : encode_rgb565<false>(p1);
         if (c0 < c1) { uint32_t swap = c0; c0 = c1; c1 = swap; }
         else if (c0 == c1) { if (c1) --c1; else ++c0; }
     }
@@ -201,7 +219,7 @@ static __device__ __forceinline__ void encode_block_half_warp(Color sample, Colo
     c1 = __shfl_sync(mask, c1, 0, 16);
 
     Color owned_color = sample_index < 4
-        ? palette_color<Srgb, true>((uint16_t)c0, (uint16_t)c1, sample_index)
+        ? palette_color<false, true>((uint16_t)c0, (uint16_t)c1, sample_index)
         : Color{};
     float best_distance = 1e30f;
     uint32_t selector = 0;

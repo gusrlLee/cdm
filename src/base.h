@@ -104,6 +104,23 @@ struct SymMat3T
 using Float3 = Vec3T<float>;
 using SymMat3 = SymMat3T<float>;
 
+// Encoding boundary only: the mean pyramid always remains linear.
+CDM_INLINE float linear_to_srgb_code(float linear)
+{
+    float code;
+    if (linear <= 0.0031308f) code = 12.92f * linear;
+    else
+    {
+#if defined(__CUDA_ARCH__)
+        // Avoid --use_fast_math replacing powf with the approximate __powf.
+        code = 1.055f * float(pow(double(linear), 1.0 / 2.4)) - 0.055f;
+#else
+        code = 1.055f * powf(linear, 1.0f / 2.4f) - 0.055f;
+#endif
+    }
+    return code < 0.0f ? 0.0f : (code > 1.0f ? 1.0f : code);
+}
+
 // Principal axis for scalar Float3 (Fallback for degenerate axis)
 CDM_INLINE Float3 compute_principal_axis(const SymMat3 &cov)
 {

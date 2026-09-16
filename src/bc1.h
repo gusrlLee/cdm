@@ -130,6 +130,59 @@ namespace bc1
         return first;
     }
 
+    // Nearest bit-replicated decoder value; midpoint ties choose the higher code.
+    template <uint32_t Bits>
+    CDM_INLINE uint32_t quantize_code_channel(float value)
+    {
+        uint32_t first = 0, count = (1u << Bits) - 1;
+        while (count)
+        {
+            uint32_t step = count >> 1, q = first + step;
+            uint32_t a = (q << (8 - Bits)) | (q >> (2 * Bits - 8));
+            uint32_t b = ((q + 1) << (8 - Bits)) | ((q + 1) >> (2 * Bits - 8));
+            float midpoint = float(a + b) * (1.0f / 510.0f);
+            if (value < midpoint) count = step;
+            else { first = q + 1; count -= step + 1; }
+        }
+        return first;
+    }
+
+    CDM_INLINE uint16_t encode_rgb565_code(Float3 color)
+    {
+        return uint16_t((quantize_code_channel<5>(color.r) << 11)
+            | (quantize_code_channel<6>(color.g) << 5) | quantize_code_channel<5>(color.b));
+    }
+
+    // Mean and covariance of 16 child samples (4 parent blocks x 4 quadrants),
+    // via the law of total covariance so within-block and between-block spread both count.
+    template <typename T>
+    CDM_INLINE void compute_child_moments(const Vec3T<T> samples[16], Vec3T<T> &mean, SymMat3T<T> &cov)
+    {
+        constexpr float quarter = 0.25f;
+        Vec3T<T> parent_means[4];
+        SymMat3T<T> within = SymMat3T<T>::zero();
+
+        mean = Vec3T<T>::zero();
+        for (int parent = 0; parent < 4; ++parent)
+        {
+            Vec3T<T> parent_mean = Vec3T<T>::zero();
+            for (int i = 0; i < 4; ++i)
+                parent_mean += samples[parent * 4 + i];
+            parent_mean = parent_mean * T(quarter);
+            parent_means[parent] = parent_mean;
+            mean += parent_mean;
+
+            for (int i = 0; i < 4; ++i)
+                within.accumulate_outer(samples[parent * 4 + i] - parent_mean, T(quarter));
+        }
+        mean = mean * T(quarter);
+
+        // Law of total covariance: E[Cov(X|parent)] + Cov(E[X|parent]).
+        cov = within * T(quarter);
+        for (const Vec3T<T> &parent_mean : parent_means)
+            cov.accumulate_outer(parent_mean - mean, T(quarter));
+    }
+
 #if !defined(__CUDACC__)
 
     // Explicit 256-entry sRGB to Linear table used by the CPU paths.
@@ -247,36 +300,6 @@ static const float c_srgb_to_linear[256] = {
     // Statistics
     // ---------------------------------------------------------------------
 
-    // Mean and covariance of 16 child samples (4 parent blocks x 4 quadrants),
-    // via the law of total covariance so within-block and between-block spread both count.
-    template <typename T>
-    CDM_INLINE void compute_child_moments(const Vec3T<T> samples[16], Vec3T<T> &mean, SymMat3T<T> &cov)
-    {
-        constexpr float quarter = 0.25f;
-        Vec3T<T> parent_means[4];
-        SymMat3T<T> within = SymMat3T<T>::zero();
-
-        mean = Vec3T<T>::zero();
-        for (int parent = 0; parent < 4; ++parent)
-        {
-            Vec3T<T> parent_mean = Vec3T<T>::zero();
-            for (int i = 0; i < 4; ++i)
-                parent_mean += samples[parent * 4 + i];
-            parent_mean = parent_mean * T(quarter);
-            parent_means[parent] = parent_mean;
-            mean += parent_mean;
-
-            for (int i = 0; i < 4; ++i)
-                within.accumulate_outer(samples[parent * 4 + i] - parent_mean, T(quarter));
-        }
-        mean = mean * T(quarter);
-
-        // Law of total covariance: E[Cov(X|parent)] + Cov(E[X|parent]).
-        cov = within * T(quarter);
-        for (const Vec3T<T> &parent_mean : parent_means)
-            cov.accumulate_outer(parent_mean - mean, T(quarter));
-    }
-
     // ---------------------------------------------------------------------
     // RGB565 quantization
     // ---------------------------------------------------------------------
@@ -333,7 +356,8 @@ static const float c_srgb_to_linear[256] = {
 
     // Scalar encoder: fit endpoints via PCA + least squares, quantize to RGB565,
     // then assign the closest palette selector to each of the 16 child samples.
-    CDM_INLINE Block64 encode_samples_scalar(const Float3 samples[16], bool is_srgb)
+    template <bool DecoderQuantization = false>
+    CDM_INLINE Block64 encode_samples_code_scalar(const Float3 samples[16])
     {
         constexpr float inv3 = 1.0f / 3.0f;
         Float3 mean;
@@ -391,8 +415,8 @@ static const float c_srgb_to_linear[256] = {
         }
 
         // 5. Quantize to RGB565 and enforce opaque mode (c0 > c1)
-        uint16_t c0 = encode_rgb565_fast(p0, is_srgb);
-        uint16_t c1 = encode_rgb565_fast(p1, is_srgb);
+        uint16_t c0 = DecoderQuantization ? encode_rgb565_code(p0) : encode_rgb565_fast<false>(p0);
+        uint16_t c1 = DecoderQuantization ? encode_rgb565_code(p1) : encode_rgb565_fast<false>(p1);
 
         if (c0 < c1)
         {
@@ -408,7 +432,7 @@ static const float c_srgb_to_linear[256] = {
 
         // 6. Build final palette and assign 2-bit selectors
         Float3 final_colors[4];
-        get_opaque_palette_scalar(c0, c1, is_srgb, final_colors);
+        get_opaque_palette_scalar(c0, c1, false, final_colors);
 
         uint32_t indices = 0;
         for (int i = 0; i < 16; ++i)
@@ -427,6 +451,26 @@ static const float c_srgb_to_linear[256] = {
             indices |= (best_idx << (2 * texel_map[i]));
         }
         return Block64{c0, c1, indices};
+    }
+
+    template <bool IsSrgb>
+    CDM_INLINE Block64 encode_samples_scalar(const Float3 samples[16])
+    {
+        if constexpr (IsSrgb)
+        {
+            Float3 code[16];
+            for (int i = 0; i < 16; ++i)
+                code[i] = {linear_to_srgb_code(samples[i].r), linear_to_srgb_code(samples[i].g),
+                           linear_to_srgb_code(samples[i].b)};
+            return encode_samples_code_scalar<true>(code);
+        }
+        else
+            return encode_samples_code_scalar(samples);
+    }
+
+    CDM_INLINE Block64 encode_samples_scalar(const Float3 samples[16], bool is_srgb)
+    {
+        return is_srgb ? encode_samples_scalar<true>(samples) : encode_samples_scalar<false>(samples);
     }
 
     // ---------------------------------------------------------------------
@@ -513,6 +557,14 @@ CDM_INLINE v4f reciprocal(const v4f &a)
 {
     __m128 estimate = _mm_rcp_ps(a.v);
     return _mm_mul_ps(estimate, _mm_sub_ps(_mm_set1_ps(2.0f), _mm_mul_ps(a.v, estimate)));
+}
+
+CDM_INLINE v4f linear_to_srgb_code(const v4f &linear)
+{
+    alignas(16) float lanes[4];
+    _mm_store_ps(lanes, linear.v);
+    for (float &lane : lanes) lane = linear_to_srgb_code(lane);
+    return _mm_load_ps(lanes);
 }
 
 // 4-block parallel types using our existing templates
@@ -715,8 +767,10 @@ namespace bc1
         alignas(16) uint32_t c0[4], c1[4];
         for (int lane = 0; lane < 4; ++lane)
         {
-            c0[lane] = encode_rgb565_fast<IsSrgb>({p0r[lane], p0g[lane], p0b[lane]});
-            c1[lane] = encode_rgb565_fast<IsSrgb>({p1r[lane], p1g[lane], p1b[lane]});
+            c0[lane] = IsSrgb ? encode_rgb565_code({p0r[lane], p0g[lane], p0b[lane]})
+                             : encode_rgb565_fast<false>({p0r[lane], p0g[lane], p0b[lane]});
+            c1[lane] = IsSrgb ? encode_rgb565_code({p1r[lane], p1g[lane], p1b[lane]})
+                             : encode_rgb565_fast<false>({p1r[lane], p1g[lane], p1b[lane]});
             if (c0[lane] < c1[lane]) std::swap(c0[lane], c1[lane]);
             else if (c0[lane] == c1[lane])
             {
@@ -725,7 +779,7 @@ namespace bc1
             }
         }
 
-        PaletteBatch palette = get_palette_x4<IsSrgb, true>(_mm_load_si128((const __m128i *)c0), _mm_load_si128((const __m128i *)c1));
+        PaletteBatch palette = get_palette_x4<false, true>(_mm_load_si128((const __m128i *)c0), _mm_load_si128((const __m128i *)c1));
         __m128i packed_indices = _mm_setzero_si128();
         for (int i = 0; i < 16; ++i)
         {
@@ -748,8 +802,8 @@ namespace bc1
             out[lane] = Block64{(uint16_t)c0[lane], (uint16_t)c1[lane], indices[lane]};
     }
 
-    template <bool IsSrgb>
-    CDM_INLINE void encode_samples_x4(const Float3x4 samples[16], Block64 *out_blocks)
+    template <bool DecoderQuantization = false>
+    CDM_INLINE void encode_samples_code_x4(const Float3x4 samples[16], Block64 *out_blocks)
     {
         constexpr float inv3 = 1.0f / 3.0f;
         Float3x4 mean;
@@ -824,7 +878,22 @@ namespace bc1
             p1.b = _mm_blendv_ps(solved_p1.b.v, mean.b.v, mask);
         }
 
-        pack_child_blocks_x4<IsSrgb>(samples, p0, p1, out_blocks);
+        pack_child_blocks_x4<DecoderQuantization>(samples, p0, p1, out_blocks);
+    }
+
+    template <bool IsSrgb>
+    CDM_INLINE void encode_samples_x4(const Float3x4 samples[16], Block64 *out_blocks)
+    {
+        if constexpr (IsSrgb)
+        {
+            Float3x4 code[16];
+            for (int i = 0; i < 16; ++i)
+                code[i] = {linear_to_srgb_code(samples[i].r), linear_to_srgb_code(samples[i].g),
+                           linear_to_srgb_code(samples[i].b)};
+            encode_samples_code_x4<true>(code, out_blocks);
+        }
+        else
+            encode_samples_code_x4(samples, out_blocks);
     }
 
     CDM_INLINE Float3x4 block_means_x4(const Float3x4 quadrants[4])

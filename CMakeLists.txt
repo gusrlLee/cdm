@@ -50,9 +50,3 @@ target_compile_options(${PROJECT_NAME} PRIVATE
     $<$<AND:$<CONFIG:Release>,$<COMPILE_LANGUAGE:CUDA>>:--use_fast_math>
     $<$<AND:$<CONFIG:Release>,$<COMPILE_LANGUAGE:CUDA>>:--extra-device-vectorization>
 )
-
-add_executable(cdm_baseline_test tests/baseline.cpp)
-target_include_directories(cdm_baseline_test PRIVATE src)
-if(MSVC)
-    target_compile_options(cdm_baseline_test PRIVATE /arch:AVX2)
-endif()

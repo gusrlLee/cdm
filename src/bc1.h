@@ -16,6 +16,11 @@ using MeanImage = MeanImage3;
 // Below this total sample variance, a block uses its mean as both endpoints.
 constexpr float kFlatVarianceEpsilon = 1e-10f;
 
+template <typename T> CDM_INLINE T flat_variance(const SymMat3T<T> &cov)
+{
+    return cov.rr + cov.gg + cov.bb;
+}
+
 struct Rgb8
 {
     uint32_t r, g, b;
@@ -273,7 +278,7 @@ template <bool IsSrgb> CDM_INLINE Block64 encode_samples_scalar(const Float3 sam
     Float3 mean;
     SymMat3 cov;
     compute_child_moments(samples, mean, cov);
-    bool flat = cov.rr + cov.gg + cov.bb < kFlatVarianceEpsilon;
+    const bool flat = flat_variance(cov) < kFlatVarianceEpsilon;
 
     Float3 axis = compute_principal_axis(cov);
     float projections[16];
@@ -286,8 +291,10 @@ template <bool IsSrgb> CDM_INLINE Block64 encode_samples_scalar(const Float3 sam
         maximum = std::max(maximum, projection);
     }
 
-    Float3 p0 = clamp01(mean + axis * minimum);
-    Float3 p1 = clamp01(mean + axis * maximum);
+    Float3 p0 = flat ? mean : mean + axis * minimum;
+    Float3 p1 = flat ? mean : mean + axis * maximum;
+    p0 = clamp01(p0);
+    p1 = clamp01(p1);
     uint16_t c0 = encode_rgb565<IsSrgb>(p0);
     uint16_t c1 = encode_rgb565<IsSrgb>(p1);
     if (c0 < c1)
@@ -295,24 +302,6 @@ template <bool IsSrgb> CDM_INLINE Block64 encode_samples_scalar(const Float3 sam
 
     Float3 palette[4];
     get_palette_impl<IsSrgb, true>(c0, c1, palette);
-    if (flat)
-    {
-        float best_distance = 1e30f;
-        uint32_t best_selector = 0;
-        for (uint32_t selector = 0; selector < 4; ++selector)
-        {
-            float distance = length_sq(mean - palette[selector]);
-            if (distance < best_distance)
-            {
-                best_distance = distance;
-                best_selector = selector;
-            }
-        }
-        uint32_t indices = 0;
-        for (int i = 0; i < 16; ++i)
-            indices |= best_selector << (2 * texel_map[i]);
-        return {c0, c1, indices};
-    }
     struct ProjectionEntry
     {
         float value;
@@ -474,17 +463,16 @@ template <bool Srgb> __device__ __forceinline__ void encode_half_warp(Float3 sam
     const unsigned mask = half_warp_mask();
     Float3 mean;
     const SymMat3 covariance = half_warp_moments(sample, mean);
-    const bool flat = covariance.rr + covariance.gg + covariance.bb < kFlatVarianceEpsilon;
+    const bool flat = flat_variance(covariance) < kFlatVarianceEpsilon;
     Float3 p0, p1, axis = {1, 0, 0};
-    float projection = 0;
+    if (lane == 0)
+        axis = compute_principal_axis(covariance);
+    axis = {__shfl_sync(mask, axis.r, 0, 16), __shfl_sync(mask, axis.g, 0, 16), __shfl_sync(mask, axis.b, 0, 16)};
+    const float projection = dot(sample - mean, axis);
     if (flat)
         p0 = p1 = mean;
     else
     {
-        if (lane == 0)
-            axis = compute_principal_axis(covariance);
-        axis = {__shfl_sync(mask, axis.r, 0, 16), __shfl_sync(mask, axis.g, 0, 16), __shfl_sync(mask, axis.b, 0, 16)};
-        projection = dot(sample - mean, axis);
         p0 = mean + axis * min16(projection, mask);
         p1 = mean + axis * max16(projection, mask);
     }
@@ -508,18 +496,8 @@ template <bool Srgb> __device__ __forceinline__ void encode_half_warp(Float3 sam
     float best = 1e30f;
     for (uint32_t i = 0; i < 4; ++i)
     {
-        float error;
-        if (flat)
-        {
-            const Float3 color = {__shfl_sync(mask, owned.r, i, 16), __shfl_sync(mask, owned.g, i, 16),
-                                  __shfl_sync(mask, owned.b, i, 16)};
-            error = length_sq(sample - color);
-        }
-        else
-        {
-            const float delta = projection - __shfl_sync(mask, owned_projection, i, 16);
-            error = delta * delta;
-        }
+        const float delta = projection - __shfl_sync(mask, owned_projection, i, 16);
+        const float error = delta * delta;
         if (error < best)
         {
             best = error;
@@ -774,8 +752,8 @@ CDM_INLINE void get_quadrant_means_x4(const Block64 &b0, const Block64 &b1, cons
 // Fit -> Quantize -> Select -> Encode (SIMD): four child blocks packed from the
 // fitted endpoints, one SSE lane per block.
 template <bool IsSrgb>
-CDM_INLINE void pack_blocks_x4(const Float3x4 samples[16], const v4f projections[16], const Float3x4 &mean,
-                               const Float3x4 &axis, Float3x4 p0, Float3x4 p1, __m128 flat_mask, Block64 out[4])
+CDM_INLINE void pack_blocks_x4(const v4f projections[16], const Float3x4 &mean, const Float3x4 &axis, Float3x4 p0,
+                               Float3x4 p1, Block64 out[4])
 {
     p0 = {clamp01(p0.r), clamp01(p0.g), clamp01(p0.b)};
     p1 = {clamp01(p1.r), clamp01(p1.g), clamp01(p1.b)};
@@ -801,8 +779,6 @@ CDM_INLINE void pack_blocks_x4(const Float3x4 samples[16], const v4f projections
     v4f palette_projection[4];
     for (int selector = 0; selector < 4; ++selector)
         palette_projection[selector] = dot(palette.colors[selector] - mean, axis);
-    bool any_flat = _mm_movemask_ps(flat_mask) != 0;
-
     __m128i packed_indices = _mm_setzero_si128();
     for (int i = 0; i < 16; ++i)
     {
@@ -812,11 +788,6 @@ CDM_INLINE void pack_blocks_x4(const Float3x4 samples[16], const v4f projections
         {
             v4f delta = projections[i] - palette_projection[selector];
             v4f distance = delta * delta;
-            if (any_flat)
-            {
-                v4f rgb_distance = length_sq(samples[i] - palette.colors[selector]);
-                distance = _mm_blendv_ps(distance.v, rgb_distance.v, flat_mask);
-            }
             __m128 mask = _mm_cmplt_ps(distance.v, best_distance.v);
             best_distance = _mm_blendv_ps(best_distance.v, distance.v, mask);
             best_selector = _mm_blendv_epi8(best_selector, _mm_set1_epi32(selector), _mm_castps_si128(mask));
@@ -836,7 +807,7 @@ template <bool IsSrgb> CDM_INLINE void encode_samples_x4(const Float3x4 samples[
     Float3x4 mean;
     SymMat3x4 cov;
     compute_child_moments(samples, mean, cov);
-    __m128 flat_mask = _mm_cmplt_ps((cov.rr + cov.gg + cov.bb).v, _mm_set1_ps(kFlatVarianceEpsilon));
+    __m128 flat_mask = _mm_cmplt_ps(flat_variance(cov).v, _mm_set1_ps(kFlatVarianceEpsilon));
     Float3x4 axis = compute_principal_axis(cov);
     v4f projections[16];
     v4f minimum(1e30f), maximum(-1e30f);
@@ -846,8 +817,15 @@ template <bool IsSrgb> CDM_INLINE void encode_samples_x4(const Float3x4 samples[
         minimum = _mm_min_ps(minimum.v, projections[i].v);
         maximum = _mm_max_ps(maximum.v, projections[i].v);
     }
-    pack_blocks_x4<IsSrgb>(samples, projections, mean, axis, mean + axis * minimum, mean + axis * maximum, flat_mask,
-                           out_blocks);
+    Float3x4 p0 = mean + axis * minimum;
+    Float3x4 p1 = mean + axis * maximum;
+    p0.r = _mm_blendv_ps(p0.r.v, mean.r.v, flat_mask);
+    p0.g = _mm_blendv_ps(p0.g.v, mean.g.v, flat_mask);
+    p0.b = _mm_blendv_ps(p0.b.v, mean.b.v, flat_mask);
+    p1.r = _mm_blendv_ps(p1.r.v, mean.r.v, flat_mask);
+    p1.g = _mm_blendv_ps(p1.g.v, mean.g.v, flat_mask);
+    p1.b = _mm_blendv_ps(p1.b.v, mean.b.v, flat_mask);
+    pack_blocks_x4<IsSrgb>(projections, mean, axis, p0, p1, out_blocks);
 }
 
 CDM_INLINE Float3x4 block_means_x4(const Float3x4 quadrants[4])

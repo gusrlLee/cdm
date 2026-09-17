@@ -1,1 +1,1 @@
-# compression-domain-texture-mipmap-generation
+# Compression-Domain Texture Mipmap Generation

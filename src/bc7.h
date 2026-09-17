@@ -8,6 +8,12 @@
 
 namespace bc7
 {
+constexpr float kFlatVarianceEpsilon = 1e-10f;
+
+template <typename T> CDM_INLINE T flat_variance(const SymMat4T<T> &cov)
+{
+    return cov.rr + cov.gg + cov.bb + cov.aa;
+}
 // Mode 6 stores one RGBA endpoint pair and sixteen 4-bit selectors.
 struct Block
 {
@@ -247,6 +253,7 @@ template <bool Srgb> CDM_INLINE Block encode_samples(const Float4 samples[16])
     SymMat4 cov = SymMat4::zero();
     for (int i = 0; i < 16; ++i)
         cov.accumulate_outer(samples[i] - mean, 1.0f / 16.0f);
+    const bool flat = flat_variance(cov) < kFlatVarianceEpsilon;
     Float4 axis = compute_principal_axis(cov);
     float lo = 1e30f, hi = -1e30f;
     for (int i = 0; i < 16; ++i)
@@ -255,7 +262,14 @@ template <bool Srgb> CDM_INLINE Block encode_samples(const Float4 samples[16])
         lo = std::min(lo, p);
         hi = std::max(hi, p);
     }
-    Float4 endpoints[2] = {clamp4(mean + axis * lo), clamp4(mean + axis * hi)};
+    Float4 endpoints[2] = {mean, mean};
+    if (!flat)
+    {
+        endpoints[0] = mean + axis * lo;
+        endpoints[1] = mean + axis * hi;
+    }
+    endpoints[0] = clamp4(endpoints[0]);
+    endpoints[1] = clamp4(endpoints[1]);
     uint8_t ep[2][4];
     quantize_endpoint<Srgb>(endpoints[0], ep[0]);
     quantize_endpoint<Srgb>(endpoints[1], ep[1]);
@@ -440,6 +454,7 @@ template <bool Srgb> CDM_INLINE void encode_samples_x4(const Float4 scalar[4][16
     SymMat4x4 cov = SymMat4x4::zero();
     for (auto &s : samples)
         cov.accumulate_outer(s - mean, v4f(1.0f / 16));
+    const __m128 flat = _mm_cmplt_ps(flat_variance(cov).v, _mm_set1_ps(kFlatVarianceEpsilon));
     Float4x4 axis = principal_axis_x4(cov);
     v4f lo(1e30f), hi(-1e30f);
     for (auto &s : samples)
@@ -449,6 +464,14 @@ template <bool Srgb> CDM_INLINE void encode_samples_x4(const Float4 scalar[4][16
         hi = _mm_max_ps(hi.v, x.v);
     }
     Float4x4 p0 = mean + axis * lo, p1 = mean + axis * hi;
+    p0.r = _mm_blendv_ps(p0.r.v, mean.r.v, flat);
+    p0.g = _mm_blendv_ps(p0.g.v, mean.g.v, flat);
+    p0.b = _mm_blendv_ps(p0.b.v, mean.b.v, flat);
+    p0.a = _mm_blendv_ps(p0.a.v, mean.a.v, flat);
+    p1.r = _mm_blendv_ps(p1.r.v, mean.r.v, flat);
+    p1.g = _mm_blendv_ps(p1.g.v, mean.g.v, flat);
+    p1.b = _mm_blendv_ps(p1.b.v, mean.b.v, flat);
+    p1.a = _mm_blendv_ps(p1.a.v, mean.a.v, flat);
     alignas(16) float values[8][4];
     _mm_store_ps(values[0], p0.r.v);
     _mm_store_ps(values[1], p0.g.v);
@@ -611,6 +634,7 @@ template <bool Srgb> __device__ __forceinline__ void encode_half_warp(Float4 sam
                           sum16(delta.r * delta.g, mask) / 16, sum16(delta.r * delta.b, mask) / 16,
                           sum16(delta.r * delta.a, mask) / 16, sum16(delta.g * delta.b, mask) / 16,
                           sum16(delta.g * delta.a, mask) / 16, sum16(delta.b * delta.a, mask) / 16};
+    const bool flat = flat_variance(covariance) < kFlatVarianceEpsilon;
     Float4 axis = {1, 0, 0, 0};
     if (lane == 0)
         axis = compute_principal_axis(covariance);
@@ -619,6 +643,8 @@ template <bool Srgb> __device__ __forceinline__ void encode_half_warp(Float4 sam
     const float projection = dot(delta, axis);
     const float low = min16(projection, mask), high = max16(projection, mask);
     Float4 endpoints_float[2] = {mean + axis * low, mean + axis * high};
+    if (flat)
+        endpoints_float[0] = endpoints_float[1] = mean;
     uint32_t endpoints[2][4] = {};
     if (lane == 0)
     {

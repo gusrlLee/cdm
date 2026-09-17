@@ -47,10 +47,14 @@ static bool prepare_mip_chain(Image &image)
 
 static bool parse_backend(std::string_view value, Backend &backend)
 {
-    if (value == "cpu") backend = Backend::CPU;
-    else if (value == "simd" || value == "cpu-simd" || value == "cpu_simd") backend = Backend::CPU_SIMD;
-    else if (value == "cuda") backend = Backend::CUDA;
-    else return false;
+    if (value == "cpu")
+        backend = Backend::CPU;
+    else if (value == "simd" || value == "cpu-simd" || value == "cpu_simd")
+        backend = Backend::CPU_SIMD;
+    else if (value == "cuda")
+        backend = Backend::CUDA;
+    else
+        return false;
     return true;
 }
 
@@ -58,9 +62,12 @@ static const char *backend_name(Backend backend)
 {
     switch (backend)
     {
-    case Backend::CPU: return "CPU";
-    case Backend::CPU_SIMD: return "CPU_SIMD";
-    case Backend::CUDA: return "CUDA";
+    case Backend::CPU:
+        return "CPU";
+    case Backend::CPU_SIMD:
+        return "CPU_SIMD";
+    case Backend::CUDA:
+        return "CUDA";
     }
     return "Unknown";
 }
@@ -102,8 +109,8 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    std::cout << "Loaded " << image.width << 'x' << image.height
-              << " Format: " << static_cast<int>(image.format) << '\n';
+    std::cout << "Loaded " << image.width << 'x' << image.height << " Format: " << static_cast<int>(image.format)
+              << '\n';
     if (!prepare_mip_chain(image))
     {
         std::cerr << "Failed to allocate mip chain memory.\n";

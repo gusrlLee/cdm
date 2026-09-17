@@ -46,9 +46,7 @@ struct DdsHeaderDxt10
 
 constexpr uint32_t MakeFourCC(char c0, char c1, char c2, char c3)
 {
-    return (uint32_t)(uint8_t)(c0) |
-           ((uint32_t)(uint8_t)(c1) << 8) |
-           ((uint32_t)(uint8_t)(c2) << 16) |
+    return (uint32_t)(uint8_t)(c0) | ((uint32_t)(uint8_t)(c1) << 8) | ((uint32_t)(uint8_t)(c2) << 16) |
            ((uint32_t)(uint8_t)(c3) << 24);
 }
 
@@ -250,8 +248,9 @@ bool save_dds(const char *filepath, const Image *image)
         fclose(fp);
         return false;
     }
-    dxt10.dxgi_format = image->format == Format::BC6H_UF16 ? 95 :
-        (image->format == Format::BC7 ? (image->is_srgb ? 99 : 98) : (image->is_srgb ? 72 : 71));
+    dxt10.dxgi_format = image->format == Format::BC6H_UF16
+                            ? 95
+                            : (image->format == Format::BC7 ? (image->is_srgb ? 99 : 98) : (image->is_srgb ? 72 : 71));
 
     fwrite(&dxt10, sizeof(dxt10), 1, fp);
 

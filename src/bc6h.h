@@ -20,7 +20,7 @@
    PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED. */
 namespace bc6h
 {
-using MeanImage = bc1::MeanImage;
+using MeanImage = MeanImage3;
 
 struct Block
 {
@@ -864,7 +864,7 @@ CDM_INLINE bc6h::Block encode_samples_scalar(const Float3 samples[16])
             float error = length_sq(clean[i] - palette[j]);
             if (error < best) { best = error; best_index = j; }
         }
-        selector[bc1::texel_map[i]] = best_index;
+        selector[texel_map[i]] = best_index;
     }
     return pack_mode11(endpoint, selector);
 }
@@ -880,7 +880,7 @@ CDM_INLINE bc6h::Block generate_child_block_scalar(const bc6h::Block &p00, const
     for (int parent = 0; parent < 4; ++parent)
         parent_means[parent] = (samples[parent * 4] + samples[parent * 4 + 1]
             + samples[parent * 4 + 2] + samples[parent * 4 + 3]) * 0.25f;
-    bc1::repeat_small_samples(samples, valid_width, valid_height);
+    repeat_small_samples(samples, valid_width, valid_height);
     return encode_samples_scalar(samples);
 }
 
@@ -890,9 +890,9 @@ CDM_INLINE bc6h::Block generate_child_block_from_means_scalar(const MeanImage &s
     Float3 samples[16];
     for (uint32_t i = 0; i < 16; ++i)
     {
-        uint32_t local = bc1::texel_map[i];
-        samples[i] = source.get(bc1::repeat_small_coordinate(block_x * 4 + (local & 3u), valid_width),
-            bc1::repeat_small_coordinate(block_y * 4 + (local >> 2), valid_height));
+        uint32_t local = texel_map[i];
+        samples[i] = source.get(repeat_small_coordinate(block_x * 4 + (local & 3u), valid_width),
+            repeat_small_coordinate(block_y * 4 + (local >> 2), valid_height));
     }
     return encode_samples_scalar(samples);
 }
@@ -957,7 +957,7 @@ CDM_INLINE void encode_samples_x4(const Float3x4 samples[16], bc6h::Block output
         }
         alignas(16) uint32_t index[4];
         _mm_store_si128((__m128i *)index, best_index);
-        for (int lane = 0; lane < 4; ++lane) selectors[lane][bc1::texel_map[i]] = index[lane];
+        for (int lane = 0; lane < 4; ++lane) selectors[lane][texel_map[i]] = index[lane];
     }
     for (int lane = 0; lane < 4; ++lane) output[lane] = pack_mode11(endpoints[lane], selectors[lane]);
 }
@@ -981,7 +981,7 @@ CDM_INLINE void generate_child_blocks_x4(const bc6h::Block *row0, const bc6h::Bl
         means.set(source_x + lane * 2 + 1, source_y0, parent_means[1]);
         means.set(source_x + lane * 2, source_y1, parent_means[2]);
         means.set(source_x + lane * 2 + 1, source_y1, parent_means[3]);
-        bc1::repeat_small_samples(scalar[lane], valid_width, valid_height);
+        repeat_small_samples(scalar[lane], valid_width, valid_height);
     }
     Float3x4 packed[16];
     for (int i = 0; i < 16; ++i)
@@ -1006,9 +1006,9 @@ CDM_INLINE void generate_child_blocks_from_means_x4(const MeanImage &source, uin
         for (uint32_t i = 0; i < 16; ++i)
         {
             uint32_t x = block_x + (lane < lanes ? lane : lanes - 1);
-            uint32_t local = bc1::texel_map[i];
-            scalar[lane][i] = source.get(bc1::repeat_small_coordinate(x * 4 + (local & 3u), valid_width),
-                bc1::repeat_small_coordinate(block_y * 4 + (local >> 2), valid_height));
+            uint32_t local = texel_map[i];
+            scalar[lane][i] = source.get(repeat_small_coordinate(x * 4 + (local & 3u), valid_width),
+                repeat_small_coordinate(block_y * 4 + (local >> 2), valid_height));
         }
     Float3x4 packed[16];
     for (int i = 0; i < 16; ++i)
@@ -1018,6 +1018,109 @@ CDM_INLINE void generate_child_blocks_from_means_x4(const MeanImage &source, uin
     bc6h::Block encoded[4];
     encode_samples_x4(packed, encoded);
     for (uint32_t lane = 0; lane < lanes; ++lane) destination[lane] = encoded[lane];
+}
+#endif
+
+#if defined(__CUDACC__)
+// Decode work is shared by four lanes; encoding assigns one sample to each
+// half-warp lane.
+__device__ __forceinline__ Float3 device_quadrant_mean(const Block &block,
+                                                       uint32_t quadrant) {
+  const unsigned mask = half_warp_mask();
+  const uint32_t source_lane = (threadIdx.x & 15u) & ~3u;
+  Float3 means[4] = {};
+  if (quadrant == 0) {
+    Float3 pixels[16];
+    decode_block(block, pixels);
+    for (Float3 &pixel : pixels)
+      pixel = sanitize_hdr(pixel);
+    for (uint32_t q = 0; q < 4; ++q) {
+      const uint32_t x = (q & 1u) * 2u, y = (q >> 1u) * 2u;
+      means[q] = (pixels[y * 4 + x] + pixels[y * 4 + x + 1] +
+                  pixels[(y + 1) * 4 + x] + pixels[(y + 1) * 4 + x + 1]) *
+                 0.25f;
+    }
+  }
+  Float3 result{};
+  for (uint32_t q = 0; q < 4; ++q) {
+    Float3 value = means[q];
+    value = {__shfl_sync(mask, value.r, source_lane, 16),
+             __shfl_sync(mask, value.g, source_lane, 16),
+             __shfl_sync(mask, value.b, source_lane, 16)};
+    if (quadrant == q)
+      result = value;
+  }
+  return result;
+}
+
+__device__ __forceinline__ void encode_half_warp(Float3 sample, uint32_t lane,
+                                                 Block *output) {
+  const unsigned mask = half_warp_mask();
+  sample = sanitize_hdr(sample);
+  Float3 mean;
+  const SymMat3 covariance = half_warp_moments(sample, mean);
+  Float3 axis = {1, 0, 0};
+  if (lane == 0)
+    axis = compute_principal_axis(covariance);
+  axis = {__shfl_sync(mask, axis.r, 0, 16), __shfl_sync(mask, axis.g, 0, 16),
+          __shfl_sync(mask, axis.b, 0, 16)};
+  const float projection = dot(sample - mean, axis);
+  Float3 p0 = mean + axis * min16(projection, mask);
+  Float3 p1 = mean + axis * max16(projection, mask);
+  bool degenerate = lane == 0 && hdr_covariance_degenerate(covariance, mean);
+  degenerate = __shfl_sync(mask, degenerate, 0, 16);
+  if (degenerate)
+    p0 = p1 = mean;
+  uint32_t endpoints[2][3] = {};
+  if (lane == 0) {
+    endpoints[0][0] = quantize_endpoint(p0.r);
+    endpoints[0][1] = quantize_endpoint(p0.g);
+    endpoints[0][2] = quantize_endpoint(p0.b);
+    endpoints[1][0] = quantize_endpoint(p1.r);
+    endpoints[1][1] = quantize_endpoint(p1.g);
+    endpoints[1][2] = quantize_endpoint(p1.b);
+  }
+  for (int e = 0; e < 2; ++e)
+    for (int c = 0; c < 3; ++c)
+      endpoints[e][c] = __shfl_sync(mask, endpoints[e][c], 0, 16);
+  const Float3 owned = palette_color(endpoints, lane);
+  float best = 1e30f;
+  uint32_t selector = 0;
+  for (uint32_t s = 0; s < 16; ++s) {
+    const Float3 color = {__shfl_sync(mask, owned.r, s, 16),
+                          __shfl_sync(mask, owned.g, s, 16),
+                          __shfl_sync(mask, owned.b, s, 16)};
+    const float error = length_sq(sample - color);
+    if (error < best) {
+      best = error;
+      selector = s;
+    }
+  }
+  const bool reverse = __shfl_sync(mask, selector >= 8, 0, 16);
+  if (reverse) {
+    selector = 15 - selector;
+    for (int c = 0; c < 3; ++c) {
+      uint32_t t = endpoints[0][c];
+      endpoints[0][c] = endpoints[1][c];
+      endpoints[1][c] = t;
+    }
+  }
+  const uint32_t texel = texel_index(lane);
+  uint64_t selector_bits =
+      texel == 0 ? uint64_t(selector) << 1 : uint64_t(selector) << (4 * texel);
+  selector_bits |= uint64_t(or16(uint32_t(selector_bits), mask));
+  const uint32_t high_half =
+      or16(uint32_t(selector_bits >> 32), mask);
+  if (lane == 0) {
+    const uint64_t low =
+        3u | (uint64_t(endpoints[0][0]) << 5) |
+        (uint64_t(endpoints[0][1]) << 15) | (uint64_t(endpoints[0][2]) << 25) |
+        (uint64_t(endpoints[1][0]) << 35) | (uint64_t(endpoints[1][1]) << 45) |
+        (uint64_t(endpoints[1][2] & 0x1ffu) << 55);
+    const uint64_t high = uint64_t(endpoints[1][2] >> 9) |
+                          uint32_t(selector_bits) | (uint64_t(high_half) << 32);
+    *output = {low, high};
+  }
 }
 #endif
 

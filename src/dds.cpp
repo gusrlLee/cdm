@@ -89,18 +89,18 @@ bool load_dds(const char *filepath, Image *out_image)
         return false;
     }
 
-    // Reject Cubemaps and 3D Volume textures
+    // This pipeline accepts only two-dimensional textures.
     if (header.caps2 & 0xFE00)
     {
         fclose(fp);
         return false;
-    } // DDSCAPS2_CUBEMAP
+    }
 
     if (header.flags & 0x800000)
     {
         fclose(fp);
         return false;
-    } // DDSD_DEPTH
+    }
 
     out_image->width = header.width;
     out_image->height = header.height;
@@ -113,7 +113,7 @@ bool load_dds(const char *filepath, Image *out_image)
     out_image->is_srgb = false;
 
     if (header.ddspf.flags & 0x4)
-    { // DDPF_FOURCC
+    {
         if (header.ddspf.four_cc == MakeFourCC('D', 'X', 'T', '1'))
         {
             out_image->format = Format::BC1;
@@ -127,7 +127,7 @@ bool load_dds(const char *filepath, Image *out_image)
                 return false;
             }
 
-            // Reject non-2D textures and texture arrays
+            // Texture arrays and non-2D resources need different mip layouts.
             if (dxt10.resource_dimension != 3 || dxt10.array_size > 1)
             {
                 fclose(fp);
@@ -221,11 +221,11 @@ bool save_dds(const char *filepath, const Image *image)
     if (!fp)
         return false;
 
-    // 1. Magic
+    // Every DDS file starts with the four-byte magic value.
     uint32_t magic = MakeFourCC('D', 'D', 'S', ' ');
     fwrite(&magic, sizeof(magic), 1, fp);
 
-    // 2. Header 작성
+    // Write the legacy DDS header followed by the DX10 extension.
     DdsHeader header = {};
     header.size = 124;
     header.flags = 0x1 | 0x2 | 0x4 | 0x1000 | 0x20000; // CAPS, HEIGHT, WIDTH, PIXELFORMAT, MIPMAPCOUNT

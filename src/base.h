@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <cmath>
 #if defined(__CUDACC__)
+#include <cuda_runtime.h>
 #define CDM_INLINE __host__ __device__ inline
 #else
 #define CDM_INLINE inline
@@ -123,18 +124,25 @@ using SymMat4 = SymMat4T<float>;
 
 CDM_INLINE Float4 compute_principal_axis(const SymMat4 &cov)
 {
-    Float4 axis = {0.5f, 0.5f, 0.5f, 0.5f};
-    for (int i = 0; i < 4; ++i)
-    {
-        Float4 next = cov.multiply(axis);
-        float n = length_sq(next);
-        if (n <= 1e-20f) return {1.0f, 0.0f, 0.0f, 0.0f};
-        axis = next * (1.0f / sqrtf(n));
-    }
-    return axis;
+    // Scale before measuring columns so low-contrast covariance is not mistaken for zero.
+    const float scale = fmaxf(fmaxf(fmaxf(fabsf(cov.rr), fabsf(cov.gg)), fmaxf(fabsf(cov.bb), fabsf(cov.aa))),
+        fmaxf(fmaxf(fmaxf(fabsf(cov.rg), fabsf(cov.rb)), fmaxf(fabsf(cov.ra), fabsf(cov.gb))),
+              fmaxf(fabsf(cov.ga), fabsf(cov.ba))));
+    if (!(scale > 0.0f) || !isfinite(scale)) return {1.0f, 0.0f, 0.0f, 0.0f};
+
+    const float inv_scale = 1.0f / scale;
+    Float4 axis = {cov.rr*inv_scale,cov.rg*inv_scale,cov.rb*inv_scale,cov.ra*inv_scale};
+    float best_norm = length_sq(axis);
+    Float4 candidate = {cov.rg*inv_scale,cov.gg*inv_scale,cov.gb*inv_scale,cov.ga*inv_scale};
+    float n = length_sq(candidate); if (n > best_norm) { axis = candidate; best_norm = n; }
+    candidate = {cov.rb*inv_scale,cov.gb*inv_scale,cov.bb*inv_scale,cov.ba*inv_scale};
+    n = length_sq(candidate); if (n > best_norm) { axis = candidate; best_norm = n; }
+    candidate = {cov.ra*inv_scale,cov.ga*inv_scale,cov.ba*inv_scale,cov.aa*inv_scale};
+    n = length_sq(candidate); if (n > best_norm) { axis = candidate; best_norm = n; }
+    return axis * (1.0f / sqrtf(best_norm));
 }
 
-// Principal axis for scalar Float3 (Fallback for degenerate axis)
+// Use deterministic fallback directions when the first covariance response vanishes.
 CDM_INLINE Float3 compute_principal_axis(const SymMat3 &cov)
 {
     const float matrix_norm_sq = cov.rr * cov.rr + cov.gg * cov.gg + cov.bb * cov.bb
@@ -162,3 +170,68 @@ CDM_INLINE Float3 compute_principal_axis(const SymMat3 &cov)
 
     return lsq > degenerate_threshold ? next * (1.0f / sqrtf(lsq)) : Float3{1.0f, 0.0f, 0.0f};
 }
+
+#if defined(__CUDACC__)
+__constant__ float g_srgb_to_linear[256];
+__constant__ float g_threshold31[31];
+__constant__ float g_threshold63[63];
+
+__device__ __forceinline__ uint32_t clamp_index(uint32_t value, uint32_t limit)
+{
+    return value < limit ? value : limit - 1;
+}
+
+template <bool Srgb>
+__device__ __forceinline__ float decode_channel(uint32_t value)
+{
+    if constexpr (Srgb) return g_srgb_to_linear[value];
+    return float(value) * (1.0f / 255.0f);
+}
+
+__device__ __forceinline__ unsigned half_warp_mask()
+{
+    return 0xffffu << (threadIdx.x & 16);
+}
+
+__device__ __forceinline__ float sum4(float value, unsigned mask)
+{
+    value += __shfl_xor_sync(mask, value, 1, 4);
+    return value + __shfl_xor_sync(mask, value, 2, 4);
+}
+
+__device__ __forceinline__ float sum16(float value, unsigned mask)
+{
+    for (int offset = 8; offset; offset >>= 1) value += __shfl_down_sync(mask, value, offset, 16);
+    return __shfl_sync(mask, value, 0, 16);
+}
+
+__device__ __forceinline__ float min16(float value, unsigned mask)
+{
+    for (int offset = 8; offset; offset >>= 1)
+        value = fminf(value, __shfl_down_sync(mask, value, offset, 16));
+    return __shfl_sync(mask, value, 0, 16);
+}
+
+__device__ __forceinline__ float max16(float value, unsigned mask)
+{
+    for (int offset = 8; offset; offset >>= 1)
+        value = fmaxf(value, __shfl_down_sync(mask, value, offset, 16));
+    return __shfl_sync(mask, value, 0, 16);
+}
+
+__device__ __forceinline__ uint32_t or16(uint32_t value, unsigned mask)
+{
+    for (int offset = 8; offset; offset >>= 1) value |= __shfl_down_sync(mask, value, offset, 16);
+    return __shfl_sync(mask, value, 0, 16);
+}
+
+__device__ __forceinline__ SymMat3 half_warp_moments(Float3 sample, Float3 &mean)
+{
+    const unsigned mask = half_warp_mask();
+    mean = {sum16(sample.r, mask) / 16, sum16(sample.g, mask) / 16, sum16(sample.b, mask) / 16};
+    const Float3 delta = sample - mean;
+    return {sum16(delta.r * delta.r, mask) / 16, sum16(delta.g * delta.g, mask) / 16,
+        sum16(delta.b * delta.b, mask) / 16, sum16(delta.r * delta.g, mask) / 16,
+        sum16(delta.r * delta.b, mask) / 16, sum16(delta.g * delta.b, mask) / 16};
+}
+#endif

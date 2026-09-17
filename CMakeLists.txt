@@ -9,6 +9,7 @@ add_executable(
     src/dds.h
     src/mip.h
     src/base.h
+    src/mean.h
     src/bc1.h
     src/bc6h.h
     src/bc7.h
@@ -49,3 +50,13 @@ target_compile_options(${PROJECT_NAME} PRIVATE
     $<$<AND:$<CONFIG:Release>,$<COMPILE_LANGUAGE:CUDA>>:--use_fast_math>
     $<$<AND:$<CONFIG:Release>,$<COMPILE_LANGUAGE:CUDA>>:--extra-device-vectorization>
 )
+
+include(CTest)
+if(BUILD_TESTING)
+    add_executable(cdm_pca4_test tests/pca4.cpp)
+    target_include_directories(cdm_pca4_test PRIVATE src)
+    if(NOT MSVC)
+        target_compile_options(cdm_pca4_test PRIVATE -msse4.1)
+    endif()
+    add_test(NAME pca4 COMMAND cdm_pca4_test)
+endif()

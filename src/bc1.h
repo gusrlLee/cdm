@@ -1,6 +1,6 @@
 #pragma once
 
-#include "base.h"
+#include "mean.h"
 #include <algorithm>
 #include <array>
 #include <cstddef>
@@ -11,75 +11,10 @@ namespace bc1
     // BC1 types / constants
     // ---------------------------------------------------------------------
 
-    // Linear mean pyramid. Separate channels keep downsampling contiguous and vectorizable.
-    struct MeanImage
-    {
-        float *r = nullptr;
-        float *g = nullptr;
-        float *b = nullptr;
-        uint32_t width = 0;
-        uint32_t height = 0;
-
-        CDM_INLINE Float3 get(uint32_t x, uint32_t y) const
-        {
-            x = x < width ? x : width - 1;
-            y = y < height ? y : height - 1;
-            size_t index = (size_t)y * width + x;
-            return {r[index], g[index], b[index]};
-        }
-
-        CDM_INLINE void set(uint32_t x, uint32_t y, const Float3 &value) const
-        {
-            size_t index = (size_t)y * width + x;
-            r[index] = value.r;
-            g[index] = value.g;
-            b[index] = value.b;
-        }
-    };
+    using MeanImage = MeanImage3;
 
     // Below this total sample variance, a block uses its mean as both endpoints.
     constexpr float kFlatVarianceEpsilon = 1e-10f;
-
-    // Maps a linear child-sample index (parent*4 + quadrant) to its texel position
-    // inside the 4x4 block, so results match a block's native index layout.
-    constexpr uint8_t texel_map[16] = {
-        0, 1, 4, 5,    // p00
-        2, 3, 6, 7,    // p10
-        8, 9, 12, 13,  // p01
-        10, 11, 14, 15 // p11
-    };
-
-    CDM_INLINE constexpr uint32_t texel_index(uint32_t sample)
-    {
-        uint32_t parent = sample >> 2;
-        uint32_t quadrant = sample & 3u;
-        uint32_t x = ((parent & 1u) << 1) | (quadrant & 1u);
-        uint32_t y = (parent & 2u) | (quadrant >> 1);
-        return y * 4 + x;
-    }
-
-    CDM_INLINE uint32_t repeat_small_coordinate(uint32_t value, uint32_t valid)
-    {
-        return valid < 4 ? value % valid : value;
-    }
-
-    CDM_INLINE uint32_t repeat_small_sample(uint32_t sample, uint32_t width, uint32_t height)
-    {
-        uint32_t texel = texel_index(sample);
-        uint32_t x = repeat_small_coordinate(texel & 3u, width);
-        uint32_t y = repeat_small_coordinate(texel >> 2, height);
-        return ((y >> 1) * 2 + (x >> 1)) * 4 + (y & 1u) * 2 + (x & 1u);
-    }
-
-    template <typename T>
-    CDM_INLINE void repeat_small_samples(Vec3T<T> samples[16], uint32_t width, uint32_t height)
-    {
-        if (width >= 4 && height >= 4) return;
-        Vec3T<T> original[16];
-        for (uint32_t i = 0; i < 16; ++i) original[i] = samples[i];
-        for (uint32_t i = 0; i < 16; ++i)
-            samples[i] = original[repeat_small_sample(i, width, height)];
-    }
 
     struct Rgb8
     {
@@ -462,6 +397,125 @@ static const float c_srgb_to_linear[256] = {
 #endif
 }
 
+#if defined(__CUDACC__)
+namespace bc1 {
+template <bool Srgb, bool Opaque = false>
+__device__ __forceinline__ Float3 device_palette_color(uint16_t c0, uint16_t c1,
+                                                       uint32_t selector) {
+  const Rgb8 color = palette_color_rgb8<Opaque>(c0, c1, selector);
+  return {decode_channel<Srgb>(color.r),
+          decode_channel<Srgb>(color.g),
+          decode_channel<Srgb>(color.b)};
+}
+
+template <bool Srgb>
+__device__ __forceinline__ Float3 device_quadrant_mean(const Block64 &block,
+                                                       uint32_t quadrant) {
+  const unsigned mask = half_warp_mask();
+  const uint32_t group_start = (threadIdx.x & 15u) & ~3u;
+  const Float3 owned = device_palette_color<Srgb>(block.c0, block.c1, quadrant);
+  const uint32_t counts = selector_region_counts(block.indices, quadrant);
+  const uint32_t shift = ((quadrant & 1u) << 2) | ((quadrant >> 1) << 4);
+  Float3 result{};
+  for (uint32_t selector = 0; selector < 4; ++selector) {
+    const uint32_t lane = group_start + selector;
+    const Float3 color = {__shfl_sync(mask, owned.r, lane, 16),
+                          __shfl_sync(mask, owned.g, lane, 16),
+                          __shfl_sync(mask, owned.b, lane, 16)};
+    const uint32_t packed = __shfl_sync(mask, counts, lane, 16);
+    result += color * (float((packed >> shift) & 15u) * 0.25f);
+  }
+  return result;
+}
+
+template <uint32_t MaxValue>
+__device__ __forceinline__ uint32_t device_quantize_channel(float value) {
+  const float *thresholds = MaxValue == 31 ? g_threshold31 : g_threshold63;
+  return quantize_with_thresholds<MaxValue>(value, thresholds);
+}
+
+template <bool Srgb>
+__device__ __forceinline__ uint16_t device_encode_rgb565(Float3 color) {
+  uint32_t r, g, b;
+  if constexpr (Srgb) {
+    r = device_quantize_channel<31>(color.r);
+    g = device_quantize_channel<63>(color.g);
+    b = device_quantize_channel<31>(color.b);
+  } else {
+    r = uint32_t(fminf(fmaxf(color.r, 0.0f), 1.0f) * 31.0f + 0.5f);
+    g = uint32_t(fminf(fmaxf(color.g, 0.0f), 1.0f) * 63.0f + 0.5f);
+    b = uint32_t(fminf(fmaxf(color.b, 0.0f), 1.0f) * 31.0f + 0.5f);
+  }
+  return uint16_t((r << 11) | (g << 5) | b);
+}
+
+// Each half-warp lane owns one sample and cooperates through shuffle
+// reductions.
+template <bool Srgb>
+__device__ __forceinline__ void encode_half_warp(Float3 sample, uint32_t lane,
+                                                 Block64 *output) {
+  const unsigned mask = half_warp_mask();
+  Float3 mean;
+  const SymMat3 covariance = half_warp_moments(sample, mean);
+  const bool flat =
+      covariance.rr + covariance.gg + covariance.bb < kFlatVarianceEpsilon;
+  Float3 p0, p1, axis = {1, 0, 0};
+  float projection = 0;
+  if (flat)
+    p0 = p1 = mean;
+  else {
+    if (lane == 0)
+      axis = compute_principal_axis(covariance);
+    axis = {__shfl_sync(mask, axis.r, 0, 16), __shfl_sync(mask, axis.g, 0, 16),
+            __shfl_sync(mask, axis.b, 0, 16)};
+    projection = dot(sample - mean, axis);
+    p0 = mean + axis * min16(projection, mask);
+    p1 = mean + axis * max16(projection, mask);
+  }
+  uint32_t c0 = 0, c1 = 0;
+  if (lane == 0) {
+    c0 = device_encode_rgb565<Srgb>(p0);
+    c1 = device_encode_rgb565<Srgb>(p1);
+    if (c0 < c1) {
+      uint32_t t = c0;
+      c0 = c1;
+      c1 = t;
+    }
+  }
+  c0 = __shfl_sync(mask, c0, 0, 16);
+  c1 = __shfl_sync(mask, c1, 0, 16);
+  const Float3 owned =
+      lane < 4
+          ? device_palette_color<Srgb, true>(uint16_t(c0), uint16_t(c1), lane)
+          : Float3{};
+  const float owned_projection = lane < 4 ? dot(owned - mean, axis) : 0.0f;
+  uint32_t selector = 0;
+  float best = 1e30f;
+  for (uint32_t i = 0; i < 4; ++i) {
+    float error;
+    if (flat) {
+      const Float3 color = {__shfl_sync(mask, owned.r, i, 16),
+                            __shfl_sync(mask, owned.g, i, 16),
+                            __shfl_sync(mask, owned.b, i, 16)};
+      error = length_sq(sample - color);
+    } else {
+      const float delta =
+          projection - __shfl_sync(mask, owned_projection, i, 16);
+      error = delta * delta;
+    }
+    if (error < best) {
+      best = error;
+      selector = i;
+    }
+  }
+  const uint32_t indices =
+      or16(selector << (2 * texel_index(lane)), mask);
+  if (lane == 0)
+    *output = {uint16_t(c0), uint16_t(c1), indices};
+}
+} // namespace bc1
+#endif
+
 // ===========================================================================
 // CPU SIMD implementation (4 blocks processed in parallel per lane)
 // ===========================================================================
@@ -496,7 +550,7 @@ CDM_INLINE v4f clamp01(const v4f &a)
     return _mm_min_ps(_mm_max_ps(a.v, _mm_setzero_ps()), _mm_set1_ps(1.0f));
 }
 
-// 4-block parallel types using our existing templates
+// Four-block vector types reuse the scalar vector and covariance templates.
 using Float3x4 = Vec3T<v4f>;
 using SymMat3x4 = SymMat3T<v4f>;
 

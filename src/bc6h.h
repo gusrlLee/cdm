@@ -968,17 +968,19 @@ CDM_INLINE bc6h::Block encode_samples_scalar(const Float3 samples[16])
     for (int e = 0; e < 2; ++e)
         for (int c = 0; c < 3; ++c)
             endpoint[e][c] = quantize_endpoint(component[e][c]);
-    Float3 palette[16];
+    float palette_projection[16];
     for (uint32_t i = 0; i < 16; ++i)
-        palette[i] = palette_color(endpoint, i);
+        palette_projection[i] = dot(palette_color(endpoint, i) - mean, axis);
     uint32_t selector[16];
     for (int i = 0; i < 16; ++i)
     {
         float best = 1e30f;
         uint32_t best_index = 0;
+        const float sample_projection = dot(clean[i] - mean, axis);
         for (uint32_t j = 0; j < 16; ++j)
         {
-            float error = length_sq(clean[i] - palette[j]);
+            const float delta = sample_projection - palette_projection[j];
+            const float error = delta * delta;
             if (error < best)
             {
                 best = error;
@@ -1062,7 +1064,11 @@ CDM_INLINE void encode_samples_x4(const Float3x4 samples[16], bc6h::Block output
     _mm_store_ps(covariance[4], cov.rb.v);
     _mm_store_ps(covariance[5], cov.gb.v);
     uint32_t endpoints[4][2][3];
-    Float3 lane_palette[4][16];
+    alignas(16) float axes[3][4];
+    _mm_store_ps(axes[0], axis.r.v);
+    _mm_store_ps(axes[1], axis.g.v);
+    _mm_store_ps(axes[2], axis.b.v);
+    alignas(16) float palette_projections[16][4];
     for (int lane = 0; lane < 4; ++lane)
     {
         SymMat3 lane_cov = {covariance[0][lane], covariance[1][lane], covariance[2][lane],
@@ -1075,21 +1081,20 @@ CDM_INLINE void encode_samples_x4(const Float3x4 samples[16], bc6h::Block output
         for (int e = 0; e < 2; ++e)
             for (int c = 0; c < 3; ++c)
                 endpoints[lane][e][c] = quantize_endpoint(values[e][c][lane]);
+        const Float3 lane_axis = {axes[0][lane], axes[1][lane], axes[2][lane]};
         for (int s = 0; s < 16; ++s)
-            lane_palette[lane][s] = palette_color(endpoints[lane], s);
+            palette_projections[s][lane] = dot(palette_color(endpoints[lane], s) - lane_mean, lane_axis);
     }
     uint32_t selectors[4][16] = {};
     for (int i = 0; i < 16; ++i)
     {
         v4f best(1e30f);
         __m128i best_index = _mm_setzero_si128();
+        const v4f sample_projection = dot(clean[i] - mean, axis);
         for (int s = 0; s < 16; ++s)
         {
-            Float3x4 color = {
-                _mm_set_ps(lane_palette[3][s].r, lane_palette[2][s].r, lane_palette[1][s].r, lane_palette[0][s].r),
-                _mm_set_ps(lane_palette[3][s].g, lane_palette[2][s].g, lane_palette[1][s].g, lane_palette[0][s].g),
-                _mm_set_ps(lane_palette[3][s].b, lane_palette[2][s].b, lane_palette[1][s].b, lane_palette[0][s].b)};
-            v4f error = length_sq(clean[i] - color);
+            const v4f delta = sample_projection - v4f(_mm_load_ps(palette_projections[s]));
+            const v4f error = delta * delta;
             __m128 mask = _mm_cmplt_ps(error.v, best.v);
             best = _mm_blendv_ps(best.v, error.v, mask);
             best_index = _mm_blendv_epi8(best_index, _mm_set1_epi32(s), _mm_castps_si128(mask));
@@ -1230,13 +1235,13 @@ __device__ __forceinline__ void encode_half_warp(Float3 sample, uint32_t lane, B
         for (int c = 0; c < 3; ++c)
             endpoints[e][c] = __shfl_sync(mask, endpoints[e][c], 0, 16);
     const Float3 owned = palette_color(endpoints, lane);
+    const float owned_projection = dot(owned - mean, axis);
     float best = 1e30f;
     uint32_t selector = 0;
     for (uint32_t s = 0; s < 16; ++s)
     {
-        const Float3 color = {__shfl_sync(mask, owned.r, s, 16), __shfl_sync(mask, owned.g, s, 16),
-                              __shfl_sync(mask, owned.b, s, 16)};
-        const float error = length_sq(sample - color);
+        const float delta = projection - __shfl_sync(mask, owned_projection, s, 16);
+        const float error = delta * delta;
         if (error < best)
         {
             best = error;

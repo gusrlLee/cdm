@@ -261,14 +261,19 @@ template <bool Srgb> CDM_INLINE Block encode_samples(const Float4 samples[16])
     quantize_endpoint<Srgb>(endpoints[1], ep[1]);
     Float4 pal[16];
     palette<Srgb>(ep, pal);
+    float palette_projection[16];
+    for (uint32_t s = 0; s < 16; ++s)
+        palette_projection[s] = dot(pal[s] - mean, axis);
     uint8_t selector[16] = {};
     for (uint32_t i = 0; i < 16; ++i)
     {
         uint32_t texel = texel_index(i), best = 0;
         float error = 1e30f;
+        const float sample_projection = dot(samples[i] - mean, axis);
         for (uint32_t s = 0; s < 16; ++s)
         {
-            float e = length_sq(samples[i] - pal[s]);
+            const float delta = sample_projection - palette_projection[s];
+            const float e = delta * delta;
             if (e < error)
             {
                 error = e;
@@ -345,54 +350,61 @@ using SymMat4x4 = SymMat4T<v4f>;
 
 CDM_INLINE Float4x4 principal_axis_x4(const SymMat4x4 &cov)
 {
-    // A nonzero covariance has a nonzero column.  Use the longest scaled column
-    // as the same single-step PCA approximation used by the BC1 path.
-    const __m128 sign = _mm_set1_ps(-0.0f);
-    auto abs4 = [&](v4f x) { return v4f(_mm_andnot_ps(sign, x.v)); };
-    v4f scale = _mm_max_ps(_mm_max_ps(abs4(cov.rr).v, abs4(cov.gg).v), _mm_max_ps(abs4(cov.bb).v, abs4(cov.aa).v));
-    scale = _mm_max_ps(
-        scale.v, _mm_max_ps(_mm_max_ps(abs4(cov.rg).v, abs4(cov.rb).v), _mm_max_ps(abs4(cov.ra).v, abs4(cov.gb).v)));
-    scale = _mm_max_ps(scale.v, _mm_max_ps(abs4(cov.ga).v, abs4(cov.ba).v));
-    __m128 valid = _mm_and_ps(_mm_cmpgt_ps(scale.v, _mm_setzero_ps()), _mm_cmple_ps(scale.v, _mm_set1_ps(FLT_MAX)));
-    v4f inv_scale = _mm_div_ps(_mm_set1_ps(1), _mm_blendv_ps(_mm_set1_ps(1), scale.v, valid));
-    Float4x4 axis = {cov.rr * inv_scale, cov.rg * inv_scale, cov.rb * inv_scale, cov.ra * inv_scale};
-    v4f best = length_sq(axis);
-    auto select = [&](Float4x4 candidate) {
-        v4f n = length_sq(candidate);
-        __m128 take = _mm_cmpgt_ps(n.v, best.v);
-        axis.r = _mm_blendv_ps(axis.r.v, candidate.r.v, take);
-        axis.g = _mm_blendv_ps(axis.g.v, candidate.g.v, take);
-        axis.b = _mm_blendv_ps(axis.b.v, candidate.b.v, take);
-        axis.a = _mm_blendv_ps(axis.a.v, candidate.a.v, take);
-        best = _mm_blendv_ps(best.v, n.v, take);
+    const v4f matrix_norm_sq = cov.rr * cov.rr + cov.gg * cov.gg + cov.bb * cov.bb + cov.aa * cov.aa +
+                               (cov.rg * cov.rg + cov.rb * cov.rb + cov.ra * cov.ra + cov.gb * cov.gb +
+                                cov.ga * cov.ga + cov.ba * cov.ba) *
+                                   v4f(2.0f);
+    const v4f threshold = matrix_norm_sq * v4f(1e-6f);
+    Float4x4 next = cov.multiply({v4f(0.5f), v4f(0.5f), v4f(0.5f), v4f(0.5f)});
+    v4f lsq = length_sq(next);
+    if (_mm_movemask_ps(_mm_cmple_ps(lsq.v, threshold.v)) == 0)
+        return next * v4f(_mm_rsqrt_ps(lsq.v));
+    const v4f h(0.70710678f), nh(-0.70710678f), zero(0.0f);
+
+    auto use_if_degenerate = [&](const Float4x4 &candidate) {
+        const __m128 mask = _mm_cmple_ps(lsq.v, threshold.v);
+        const v4f candidate_lsq = length_sq(candidate);
+        next.r = _mm_blendv_ps(next.r.v, candidate.r.v, mask);
+        next.g = _mm_blendv_ps(next.g.v, candidate.g.v, mask);
+        next.b = _mm_blendv_ps(next.b.v, candidate.b.v, mask);
+        next.a = _mm_blendv_ps(next.a.v, candidate.a.v, mask);
+        lsq = _mm_blendv_ps(lsq.v, candidate_lsq.v, mask);
     };
-    select({cov.rg * inv_scale, cov.gg * inv_scale, cov.gb * inv_scale, cov.ga * inv_scale});
-    select({cov.rb * inv_scale, cov.gb * inv_scale, cov.bb * inv_scale, cov.ba * inv_scale});
-    select({cov.ra * inv_scale, cov.ga * inv_scale, cov.ba * inv_scale, cov.aa * inv_scale});
-    v4f inv = _mm_rsqrt_ps(_mm_blendv_ps(_mm_set1_ps(1), best.v, valid));
-    axis = axis * inv;
-    axis.r = _mm_blendv_ps(_mm_set1_ps(1), axis.r.v, valid);
-    axis.g = _mm_and_ps(axis.g.v, valid);
-    axis.b = _mm_and_ps(axis.b.v, valid);
-    axis.a = _mm_and_ps(axis.a.v, valid);
-    return axis;
+    use_if_degenerate(cov.multiply({h, nh, zero, zero}));
+    use_if_degenerate(cov.multiply({zero, h, nh, zero}));
+    use_if_degenerate(cov.multiply({zero, zero, h, nh}));
+
+    const __m128 flat = _mm_cmple_ps(lsq.v, threshold.v);
+    const v4f inverse_length = _mm_rsqrt_ps(_mm_blendv_ps(lsq.v, _mm_set1_ps(1.0f), flat));
+    Float4x4 result = next * inverse_length;
+    result.r = _mm_blendv_ps(result.r.v, _mm_set1_ps(1.0f), flat);
+    result.g = _mm_andnot_ps(flat, result.g.v);
+    result.b = _mm_andnot_ps(flat, result.b.v);
+    result.a = _mm_andnot_ps(flat, result.a.v);
+    return result;
 }
 
-template <bool Srgb> CDM_INLINE Block encode_with_endpoints(const Float4 samples[16], Float4 p0, Float4 p1)
+template <bool Srgb>
+CDM_INLINE Block encode_with_endpoints(const Float4 samples[16], Float4 p0, Float4 p1, Float4 mean, Float4 axis)
 {
     uint8_t ep[2][4];
     quantize_endpoint<Srgb>(clamp4(p0), ep[0]);
     quantize_endpoint<Srgb>(clamp4(p1), ep[1]);
     Float4 pal[16];
     palette<Srgb>(ep, pal);
+    float palette_projection[16];
+    for (uint32_t s = 0; s < 16; ++s)
+        palette_projection[s] = dot(pal[s] - mean, axis);
     uint8_t selector[16] = {};
     for (uint32_t i = 0; i < 16; ++i)
     {
         uint32_t best = 0;
         float error = 1e30f;
+        const float sample_projection = dot(samples[i] - mean, axis);
         for (uint32_t s = 0; s < 16; ++s)
         {
-            float e = length_sq(samples[i] - pal[s]);
+            const float delta = sample_projection - palette_projection[s];
+            const float e = delta * delta;
             if (e < error)
             {
                 error = e;
@@ -446,10 +458,21 @@ template <bool Srgb> CDM_INLINE void encode_samples_x4(const Float4 scalar[4][16
     _mm_store_ps(values[5], p1.g.v);
     _mm_store_ps(values[6], p1.b.v);
     _mm_store_ps(values[7], p1.a.v);
+    alignas(16) float means[4][4], axes[4][4];
+    _mm_store_ps(means[0], mean.r.v);
+    _mm_store_ps(means[1], mean.g.v);
+    _mm_store_ps(means[2], mean.b.v);
+    _mm_store_ps(means[3], mean.a.v);
+    _mm_store_ps(axes[0], axis.r.v);
+    _mm_store_ps(axes[1], axis.g.v);
+    _mm_store_ps(axes[2], axis.b.v);
+    _mm_store_ps(axes[3], axis.a.v);
     for (int lane = 0; lane < 4; ++lane)
         out[lane] = encode_with_endpoints<Srgb>(scalar[lane],
                                                 {values[0][lane], values[1][lane], values[2][lane], values[3][lane]},
-                                                {values[4][lane], values[5][lane], values[6][lane], values[7][lane]});
+                                                {values[4][lane], values[5][lane], values[6][lane], values[7][lane]},
+                                                {means[0][lane], means[1][lane], means[2][lane], means[3][lane]},
+                                                {axes[0][lane], axes[1][lane], axes[2][lane], axes[3][lane]});
 }
 
 CDM_INLINE void generate_from_means_x4(const MeanImage &m, uint32_t bx, uint32_t by, uint32_t lanes, Block *out,
@@ -615,11 +638,14 @@ template <bool Srgb> __device__ __forceinline__ void encode_half_warp(Float4 sam
     for (int e = 0; e < 2; ++e)
         for (int c = 0; c < 4; ++c)
             ep[e][c] = uint8_t(endpoints[e][c]);
+    const Float4 owned = device_color<Srgb>(ep, lane);
+    const float owned_projection = dot(owned - mean, axis);
     float best = 1e30f;
     uint32_t selector = 0;
     for (uint32_t s = 0; s < 16; ++s)
     {
-        float error = length_sq(sample - device_color<Srgb>(ep, s));
+        const float delta = projection - __shfl_sync(mask, owned_projection, s, 16);
+        const float error = delta * delta;
         if (error < best)
         {
             best = error;

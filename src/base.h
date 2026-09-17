@@ -162,38 +162,32 @@ using SymMat4 = SymMat4T<float>;
 
 CDM_INLINE Float4 compute_principal_axis(const SymMat4 &cov)
 {
-    // Scale before measuring columns so low-contrast covariance is not mistaken for zero.
-    const float scale = fmaxf(fmaxf(fmaxf(fabsf(cov.rr), fabsf(cov.gg)), fmaxf(fabsf(cov.bb), fabsf(cov.aa))),
-                              fmaxf(fmaxf(fmaxf(fabsf(cov.rg), fabsf(cov.rb)), fmaxf(fabsf(cov.ra), fabsf(cov.gb))),
-                                    fmaxf(fabsf(cov.ga), fabsf(cov.ba))));
-    if (!(scale > 0.0f) || !isfinite(scale))
-        return {1.0f, 0.0f, 0.0f, 0.0f};
+    const float matrix_norm_sq = cov.rr * cov.rr + cov.gg * cov.gg + cov.bb * cov.bb + cov.aa * cov.aa +
+                                 2.0f * (cov.rg * cov.rg + cov.rb * cov.rb + cov.ra * cov.ra + cov.gb * cov.gb +
+                                         cov.ga * cov.ga + cov.ba * cov.ba);
+    const float degenerate_threshold = matrix_norm_sq * 1e-6f;
+    Float4 next = cov.multiply({0.5f, 0.5f, 0.5f, 0.5f});
+    float lsq = length_sq(next);
 
-    const float inv_scale = 1.0f / scale;
-    Float4 axis = {cov.rr * inv_scale, cov.rg * inv_scale, cov.rb * inv_scale, cov.ra * inv_scale};
-    float best_norm = length_sq(axis);
-    Float4 candidate = {cov.rg * inv_scale, cov.gg * inv_scale, cov.gb * inv_scale, cov.ga * inv_scale};
-    float n = length_sq(candidate);
-    if (n > best_norm)
+    // As in the BC1 policy, alternate seeds cover covariance orthogonal to the initial diagonal.
+    if (lsq <= degenerate_threshold)
     {
-        axis = candidate;
-        best_norm = n;
+        const float h = 0.70710678f;
+        next = cov.multiply({h, -h, 0.0f, 0.0f});
+        lsq = length_sq(next);
+        if (lsq <= degenerate_threshold)
+        {
+            next = cov.multiply({0.0f, h, -h, 0.0f});
+            lsq = length_sq(next);
+            if (lsq <= degenerate_threshold)
+            {
+                next = cov.multiply({0.0f, 0.0f, h, -h});
+                lsq = length_sq(next);
+            }
+        }
     }
-    candidate = {cov.rb * inv_scale, cov.gb * inv_scale, cov.bb * inv_scale, cov.ba * inv_scale};
-    n = length_sq(candidate);
-    if (n > best_norm)
-    {
-        axis = candidate;
-        best_norm = n;
-    }
-    candidate = {cov.ra * inv_scale, cov.ga * inv_scale, cov.ba * inv_scale, cov.aa * inv_scale};
-    n = length_sq(candidate);
-    if (n > best_norm)
-    {
-        axis = candidate;
-        best_norm = n;
-    }
-    return axis * (1.0f / sqrtf(best_norm));
+
+    return lsq > degenerate_threshold ? next * (1.0f / sqrtf(lsq)) : Float4{1.0f, 0.0f, 0.0f, 0.0f};
 }
 
 // Use deterministic fallback directions when the first covariance response vanishes.

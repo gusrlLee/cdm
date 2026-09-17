@@ -1,9 +1,11 @@
 #include "mip.h"
 #include "bc1.h"
 #include "bc6h.h"
+#include "bc7.h"
 
 #include <algorithm>
 #include <condition_variable>
+#include <cstdio>
 #include <functional>
 #include <immintrin.h>
 #include <memory>
@@ -188,6 +190,11 @@ static void downsample_means(const bc1::MeanImage &source, const bc1::MeanImage 
     g_dispatcher.parallel_rows(destination.height, (size_t)destination.width * destination.height * 3, process_rows);
 }
 
+static bc7::MeanImage make_mean_image4(float *storage, size_t capacity, uint32_t width, uint32_t height)
+{
+    return {storage, storage + capacity, storage + capacity * 2, storage + capacity * 3, width, height};
+}
+
 // ---------------------------------------------------------------------
 // Mip-level processing (dispatches into bc1.h's scalar / SIMD algorithms)
 // ---------------------------------------------------------------------
@@ -366,6 +373,77 @@ static bool generate_bc6h_cpu(Image *image)
     return true;
 }
 
+template <bool Simd>
+static void downsample_means4(const bc7::MeanImage &source, const bc7::MeanImage &destination)
+{
+    auto downsample = Simd ? downsample_channel_simd : downsample_channel_scalar;
+    auto rows = [&](uint32_t begin, uint32_t end)
+    {
+        downsample(source.r,source.width,source.height,destination.r,destination.width,begin,end);
+        downsample(source.g,source.width,source.height,destination.g,destination.width,begin,end);
+        downsample(source.b,source.width,source.height,destination.b,destination.width,begin,end);
+        downsample(source.a,source.width,source.height,destination.a,destination.width,begin,end);
+    };
+    g_dispatcher.parallel_rows(destination.height,size_t(destination.width)*destination.height*4,rows);
+}
+
+template <bool Simd>
+static void process_bc7_rows(const Image *image,const MipLevel &previous,const MipLevel &current,
+    uint32_t level,bc7::MeanImage &means,uint32_t begin,uint32_t end)
+{
+    const auto *source=reinterpret_cast<const bc7::Block*>(image->data+previous.byte_offset);
+    auto *destination=reinterpret_cast<bc7::Block*>(image->data+current.byte_offset);
+    for(uint32_t by=begin;by<end;++by)
+    {
+        auto *out=destination+size_t(by)*current.block_count_x;
+        if(level>=2)
+        {
+            if constexpr(Simd)
+                for(uint32_t bx=0;bx<current.block_count_x;bx+=4)
+                    bc7::generate_from_means_x4(means,bx,by,std::min(4u,current.block_count_x-bx),out+bx,
+                        image->is_srgb,current.width,current.height);
+            else
+                for(uint32_t bx=0;bx<current.block_count_x;++bx)
+                    out[bx]=bc7::generate_from_means(means,bx,by,image->is_srgb,current.width,current.height);
+            continue;
+        }
+        uint32_t py0=by*2,py1=std::min(py0+1,previous.block_count_y-1);
+        const auto *row0=source+size_t(py0)*previous.block_count_x;
+        const auto *row1=source+size_t(py1)*previous.block_count_x;
+        uint32_t bx=0;
+        if constexpr(Simd)
+            for(;bx+3<current.block_count_x&&(bx+3)*2+1<previous.block_count_x;bx+=4)
+                bc7::generate_child_x4(row0+bx*2,row1+bx*2,out+bx,means,bx*2,py0,py1,image->is_srgb,current.width,current.height);
+        for(;bx<current.block_count_x;++bx)
+        {
+            uint32_t px0=bx*2,px1=std::min(px0+1,previous.block_count_x-1); Float4 pm[4];
+            out[bx]=bc7::generate_child(row0[px0],row0[px1],row1[px0],row1[px1],image->is_srgb,pm,current.width,current.height);
+            means.set(px0,py0,pm[0]);means.set(px1,py0,pm[1]);means.set(px0,py1,pm[2]);means.set(px1,py1,pm[3]);
+        }
+    }
+}
+
+template <bool Simd>
+static bool generate_bc7_cpu(Image *image)
+{
+    const uint32_t bw=image->mips[0].block_count_x,bh=image->mips[0].block_count_y;
+    const size_t base_capacity=size_t(bw)*bh;
+    const uint32_t sw=(bw+1)/2,sh=(bh+1)/2; const size_t scratch_capacity=size_t(sw)*sh;
+    std::unique_ptr<float[]> base(new(std::nothrow) float[base_capacity*4]);
+    std::unique_ptr<float[]> scratch_data(new(std::nothrow) float[scratch_capacity*4]);
+    if(!base||!scratch_data)return false;
+    bc7::MeanImage means=make_mean_image4(base.get(),base_capacity,bw,bh);
+    bc7::MeanImage scratch=make_mean_image4(scratch_data.get(),scratch_capacity,sw,sh);
+    for(uint32_t level=1;level<image->mip_count;++level)
+    {
+        MipLevel previous=image->mips[level-1],current=image->mips[level];
+        if(level>=3){scratch.width=(means.width+1)/2;scratch.height=(means.height+1)/2;downsample_means4<Simd>(means,scratch);std::swap(means,scratch);}
+        auto rows=[image,previous,current,level,&means](uint32_t begin,uint32_t end){process_bc7_rows<Simd>(image,previous,current,level,means,begin,end);};
+        g_dispatcher.parallel_rows(current.block_count_y,size_t(current.block_count_x)*current.block_count_y,rows);
+    }
+    return true;
+}
+
 // ---------------------------------------------------------------------
 // Public CPU entry point
 // ---------------------------------------------------------------------
@@ -375,12 +453,24 @@ bool generate_mipmaps(Image *image, const Options &options)
     if (!image || !image->data || image->format == Format::Unknown)
         return false;
 
+    if(image->format==Format::BC7)
+    {
+        const auto *blocks=reinterpret_cast<const bc7::Block*>(image->data+image->mips[0].byte_offset);
+        const size_t count=size_t(image->mips[0].block_count_x)*image->mips[0].block_count_y;
+        for(size_t i=0;i<count;++i) if(!bc7::is_mode6(blocks[i]))
+        {
+            std::fprintf(stderr,"BC7 input block %zu is not Mode 6.\n",i);
+            return false;
+        }
+    }
     switch (options.backend)
     {
     case Backend::CPU:
-        return image->format == Format::BC1 ? generate_cpu<false>(image) : generate_bc6h_cpu<false>(image);
+        return image->format == Format::BC1 ? generate_cpu<false>(image) :
+            (image->format == Format::BC7 ? generate_bc7_cpu<false>(image) : generate_bc6h_cpu<false>(image));
     case Backend::CPU_SIMD:
-        return image->format == Format::BC1 ? generate_cpu<true>(image) : generate_bc6h_cpu<true>(image);
+        return image->format == Format::BC1 ? generate_cpu<true>(image) :
+            (image->format == Format::BC7 ? generate_bc7_cpu<true>(image) : generate_bc6h_cpu<true>(image));
     case Backend::CUDA:
         return generate_mipmaps_cuda(image);
     }

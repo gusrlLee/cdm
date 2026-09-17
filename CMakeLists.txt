@@ -11,6 +11,7 @@ add_executable(
     src/base.h
     src/bc1.h
     src/bc6h.h
+    src/bc7.h
     src/main.cpp
     src/dds.cpp
     src/cpu.cpp

@@ -1,6 +1,7 @@
 #include "mip.h"
 #include "bc1.h"
 #include "bc6h.h"
+#include "bc7.h"
 
 #include <cuda_runtime.h>
 
@@ -11,6 +12,7 @@
 
 using Color = Float3;
 using MeanImage = bc1::MeanImage;
+using Color4 = Float4;
 static_assert(sizeof(Block64) == 8);
 
 __constant__ float g_srgb_to_linear[256];
@@ -485,6 +487,108 @@ static __global__ void generate_bc6h_mean_mip(MeanImage source, bc6h::Block *des
     encode_bc6h_half_warp(sample, lane, destination + output_index);
 }
 
+template <bool Srgb>
+static __device__ __forceinline__ Color4 bc7_color(const uint8_t ep[2][4],uint32_t selector)
+{
+    uint8_t v[4];for(int c=0;c<4;++c)v[c]=bc7::interpolate(ep[0][c],ep[1][c],selector);
+    return {decode_channel<Srgb>(v[0]),decode_channel<Srgb>(v[1]),decode_channel<Srgb>(v[2]),v[3]*(1.0f/255.0f)};
+}
+
+template <bool Srgb>
+static __device__ __forceinline__ Color4 bc7_quadrant_mean(const bc7::Block &block,uint32_t quadrant)
+{
+    uint8_t ep[2][4],selectors[16];bc7::unpack(block,ep,selectors);
+    uint32_t x=(quadrant&1u)*2,y=(quadrant>>1u)*2;
+    return (bc7_color<Srgb>(ep,selectors[y*4+x])+bc7_color<Srgb>(ep,selectors[y*4+x+1])+
+        bc7_color<Srgb>(ep,selectors[(y+1)*4+x])+bc7_color<Srgb>(ep,selectors[(y+1)*4+x+1]))*0.25f;
+}
+
+template <bool Srgb>
+static __device__ __forceinline__ uint8_t bc7_quantize(float target,uint32_t pbit,bool alpha)
+{
+    uint32_t best=pbit;float best_error=1e30f;
+    for(uint32_t q=0;q<128;++q){uint32_t code=(q<<1)|pbit;float v=(Srgb&&!alpha)?g_srgb_to_linear[code]:code*(1.0f/255.0f);
+        float e=(target-v)*(target-v);if(e<best_error){best_error=e;best=code;}}
+    return uint8_t(best);
+}
+
+template <bool Srgb>
+static __device__ __forceinline__ void bc7_quantize_endpoint(Color4 value,uint8_t out[4])
+{
+    float best=1e30f;
+    for(uint32_t p=0;p<2;++p){uint8_t q[4]={bc7_quantize<Srgb>(value.r,p,false),bc7_quantize<Srgb>(value.g,p,false),
+        bc7_quantize<Srgb>(value.b,p,false),bc7_quantize<Srgb>(value.a,p,true)};
+        Color4 decoded={decode_channel<Srgb>(q[0]),decode_channel<Srgb>(q[1]),decode_channel<Srgb>(q[2]),q[3]*(1.0f/255.0f)};
+        Color4 d=decoded-value;
+        float e=length_sq(d);if(e<best){best=e;for(int c=0;c<4;++c)out[c]=q[c];}}
+}
+
+template <bool Srgb>
+static __device__ __forceinline__ void encode_bc7_half_warp(Color4 sample,uint32_t lane,bc7::Block *output)
+{
+    unsigned mask=half_warp_mask();
+    Color4 mean={sum16(sample.r,mask)/16,sum16(sample.g,mask)/16,sum16(sample.b,mask)/16,sum16(sample.a,mask)/16};
+    Color4 d=sample-mean;SymMat4 cov={sum16(d.r*d.r,mask)/16,sum16(d.g*d.g,mask)/16,sum16(d.b*d.b,mask)/16,sum16(d.a*d.a,mask)/16,
+        sum16(d.r*d.g,mask)/16,sum16(d.r*d.b,mask)/16,sum16(d.r*d.a,mask)/16,sum16(d.g*d.b,mask)/16,sum16(d.g*d.a,mask)/16,sum16(d.b*d.a,mask)/16};
+    Color4 axis={1,0,0,0};if(lane==0)axis=compute_principal_axis(cov);
+    axis={__shfl_sync(mask,axis.r,0,16),__shfl_sync(mask,axis.g,0,16),__shfl_sync(mask,axis.b,0,16),__shfl_sync(mask,axis.a,0,16)};
+    float projection=dot(d,axis),lo=min16(projection,mask),hi=max16(projection,mask);
+    Color4 p[2]={mean+axis*lo,mean+axis*hi};uint32_t endpoint[2][4]={};
+    if(lane==0)
+    {
+        p[0]={fminf(1,fmaxf(0,p[0].r)),fminf(1,fmaxf(0,p[0].g)),fminf(1,fmaxf(0,p[0].b)),fminf(1,fmaxf(0,p[0].a))};
+        p[1]={fminf(1,fmaxf(0,p[1].r)),fminf(1,fmaxf(0,p[1].g)),fminf(1,fmaxf(0,p[1].b)),fminf(1,fmaxf(0,p[1].a))};
+        uint8_t q[2][4];bc7_quantize_endpoint<Srgb>(p[0],q[0]);bc7_quantize_endpoint<Srgb>(p[1],q[1]);
+        for(int e=0;e<2;++e)for(int c=0;c<4;++c)endpoint[e][c]=q[e][c];
+    }
+    for(int e=0;e<2;++e)for(int c=0;c<4;++c)endpoint[e][c]=__shfl_sync(mask,endpoint[e][c],0,16);
+    uint8_t ep[2][4];for(int e=0;e<2;++e)for(int c=0;c<4;++c)ep[e][c]=uint8_t(endpoint[e][c]);
+    float best=1e30f;uint32_t selector=0;
+    for(uint32_t s=0;s<16;++s){float error=length_sq(sample-bc7_color<Srgb>(ep,s));if(error<best){best=error;selector=s;}}
+    bool reverse=__shfl_sync(mask,selector>=8,0,16);
+    if(reverse){selector=15-selector;for(int c=0;c<4;++c){uint8_t t=ep[0][c];ep[0][c]=ep[1][c];ep[1][c]=t;}}
+    if(lane==0)
+    {
+        uint8_t selectors[16];selectors[0]=uint8_t(selector);
+        for(int i=1;i<16;++i)selectors[bc1::texel_index(i)]=uint8_t(__shfl_sync(mask,selector,i,16));
+        *output=bc7::pack_block(ep,selectors);
+    }
+}
+
+template <bool Srgb>
+static __global__ void generate_bc7_base(const bc7::Block *source,uint32_t source_width,uint32_t source_height,
+    bc7::Block *destination,uint32_t destination_width,uint32_t destination_height,bc7::MeanImage means,
+    uint32_t valid_width,uint32_t valid_height)
+{
+    uint32_t output_index=blockIdx.x*(blockDim.x>>4)+(threadIdx.x>>4),lane=threadIdx.x&15u;
+    if(output_index>=destination_width*destination_height)return;unsigned mask=half_warp_mask();
+    uint32_t ox=lane==0?output_index%destination_width:0,oy=lane==0?output_index/destination_width:0;
+    ox=__shfl_sync(mask,ox,0,16);oy=__shfl_sync(mask,oy,0,16);uint32_t parent=lane>>2,quadrant=lane&3;
+    uint32_t x0=clamp_index(ox*2,source_width),x1=clamp_index(x0+1,source_width),y0=clamp_index(oy*2,source_height),y1=clamp_index(y0+1,source_height);
+    uint32_t sx=(parent&1)?x1:x0,sy=(parent&2)?y1:y0;Color4 sample=bc7_quadrant_mean<Srgb>(source[sy*source_width+sx],quadrant);
+    Color4 pm={sum4(sample.r,mask)*.25f,sum4(sample.g,mask)*.25f,sum4(sample.b,mask)*.25f,sum4(sample.a,mask)*.25f};
+    bool unique=parent==0||(parent==1&&x1!=x0)||(parent==2&&y1!=y0)||(parent==3&&x1!=x0&&y1!=y0);
+    if(quadrant==0&&unique){size_t i=size_t(sy)*means.width+sx;means.r[i]=pm.r;means.g[i]=pm.g;means.b[i]=pm.b;means.a[i]=pm.a;}
+    if(valid_width<4||valid_height<4){uint32_t l=bc1::repeat_small_sample(lane,valid_width,valid_height);
+        sample={__shfl_sync(mask,sample.r,l,16),__shfl_sync(mask,sample.g,l,16),__shfl_sync(mask,sample.b,l,16),__shfl_sync(mask,sample.a,l,16)};}
+    encode_bc7_half_warp<Srgb>(sample,lane,destination+output_index);
+}
+
+template <bool Srgb>
+static __global__ void generate_bc7_mean(bc7::MeanImage source,bc7::Block *destination,uint32_t destination_width,
+    uint32_t destination_height,bc7::MeanImage next,uint32_t valid_width,uint32_t valid_height)
+{
+    uint32_t oi=blockIdx.x*(blockDim.x>>4)+(threadIdx.x>>4),lane=threadIdx.x&15u;if(oi>=destination_width*destination_height)return;
+    unsigned mask=half_warp_mask();uint32_t ox=lane==0?oi%destination_width:0,oy=lane==0?oi/destination_width:0;
+    ox=__shfl_sync(mask,ox,0,16);oy=__shfl_sync(mask,oy,0,16);uint32_t t=bc1::texel_index(lane);
+    uint32_t x=clamp_index(ox*4+(t&3),source.width),y=clamp_index(oy*4+(t>>2),source.height);size_t i=size_t(y)*source.width+x;
+    Color4 sample={source.r[i],source.g[i],source.b[i],source.a[i]};
+    Color4 pm={sum4(sample.r,mask)*.25f,sum4(sample.g,mask)*.25f,sum4(sample.b,mask)*.25f,sum4(sample.a,mask)*.25f};
+    if(next.r&&(lane&3)==0){uint32_t q=lane>>2,nx=ox*2+(q&1),ny=oy*2+(q>>1);if(nx<next.width&&ny<next.height){size_t n=size_t(ny)*next.width+nx;next.r[n]=pm.r;next.g[n]=pm.g;next.b[n]=pm.b;next.a[n]=pm.a;}}
+    if(valid_width<4||valid_height<4){x=clamp_index(bc1::repeat_small_coordinate(ox*4+(t&3),valid_width),source.width);y=clamp_index(bc1::repeat_small_coordinate(oy*4+(t>>2),valid_height),source.height);i=size_t(y)*source.width+x;sample={source.r[i],source.g[i],source.b[i],source.a[i]};}
+    encode_bc7_half_warp<Srgb>(sample,lane,destination+oi);
+}
+
 // ---------------------------------------------------------------------
 // Workspace
 // ---------------------------------------------------------------------
@@ -564,7 +668,8 @@ struct CudaWorkspace
         const size_t base_count = (size_t)image->mips[0].block_count_x * image->mips[0].block_count_y;
         const size_t scratch_count = (size_t)((image->mips[0].block_count_x + 1) / 2)
             * ((image->mips[0].block_count_y + 1) / 2);
-        return data.allocate(image->data_size) && base.allocate(base_count * 3) && scratch.allocate(scratch_count * 3);
+        const size_t channels=image->format==Format::BC7?4:3;
+        return data.allocate(image->data_size) && base.allocate(base_count * channels) && scratch.allocate(scratch_count * channels);
     }
 };
 
@@ -652,6 +757,33 @@ static bool generate_bc6h_cuda_impl(Image *image, uint8_t *device_data, MeanImag
     return true;
 }
 
+template <bool Srgb>
+static bool generate_bc7_cuda_impl(Image *image,uint8_t *device_data,bc7::MeanImage means,bc7::MeanImage scratch)
+{
+    constexpr uint32_t threads=256,outputs_per_block=threads/16;
+    for(uint32_t level=1;level<image->mip_count;++level)
+    {
+        const MipLevel &previous=image->mips[level-1],&current=image->mips[level];
+        auto *destination=reinterpret_cast<bc7::Block*>(device_data+current.byte_offset);
+        uint32_t count=current.block_count_x*current.block_count_y,blocks=(count+outputs_per_block-1)/outputs_per_block;
+        if(level==1)
+        {
+            const auto *source=reinterpret_cast<const bc7::Block*>(device_data+previous.byte_offset);
+            generate_bc7_base<Srgb><<<blocks,threads>>>(source,previous.block_count_x,previous.block_count_y,destination,
+                current.block_count_x,current.block_count_y,means,current.width,current.height);
+        }
+        else
+        {
+            bc7::MeanImage next={};
+            if(level+1<image->mip_count){scratch.width=(means.width+1)/2;scratch.height=(means.height+1)/2;next=scratch;}
+            generate_bc7_mean<Srgb><<<blocks,threads>>>(means,destination,current.block_count_x,current.block_count_y,next,current.width,current.height);
+            if(level+1<image->mip_count)std::swap(means,scratch);
+        }
+        if(cudaGetLastError()!=cudaSuccess)return false;
+    }
+    return true;
+}
+
 // ---------------------------------------------------------------------
 // Public GPU entry point
 // ---------------------------------------------------------------------
@@ -686,10 +818,17 @@ bool generate_mipmaps_cuda(Image *image)
     MeanImage scratch = {g_workspace.scratch.get(), g_workspace.scratch.get() + scratch_count,
                          g_workspace.scratch.get() + scratch_count * 2, scratch_width, scratch_height};
 
+    bc7::MeanImage means4={g_workspace.base.get(),g_workspace.base.get()+base_count,
+        g_workspace.base.get()+base_count*2,g_workspace.base.get()+base_count*3,base_width,base_height};
+    bc7::MeanImage scratch4={g_workspace.scratch.get(),g_workspace.scratch.get()+scratch_count,
+        g_workspace.scratch.get()+scratch_count*2,g_workspace.scratch.get()+scratch_count*3,scratch_width,scratch_height};
     bool generated = image->format == Format::BC6H_UF16
         ? generate_bc6h_cuda_impl(image, g_workspace.data.get(), means, scratch)
-        : (image->is_srgb ? generate_cuda_impl<true>(image, g_workspace.data.get(), means, scratch)
-                          : generate_cuda_impl<false>(image, g_workspace.data.get(), means, scratch));
+        : (image->format == Format::BC7
+            ? (image->is_srgb ? generate_bc7_cuda_impl<true>(image,g_workspace.data.get(),means4,scratch4)
+                              : generate_bc7_cuda_impl<false>(image,g_workspace.data.get(),means4,scratch4))
+            : (image->is_srgb ? generate_cuda_impl<true>(image, g_workspace.data.get(), means, scratch)
+                              : generate_cuda_impl<false>(image, g_workspace.data.get(), means, scratch)));
     const size_t generated_offset = image->mips[1].byte_offset;
     return generated && cudaMemcpy(image->data + generated_offset, g_workspace.data.get() + generated_offset,
                                    image->data_size - generated_offset, cudaMemcpyDeviceToHost) == cudaSuccess;

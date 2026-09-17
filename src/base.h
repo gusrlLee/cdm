@@ -85,6 +85,55 @@ struct SymMat3T
 using Float3 = Vec3T<float>;
 using SymMat3 = SymMat3T<float>;
 
+template <typename T>
+struct Vec4T
+{
+    T r, g, b, a;
+    CDM_INLINE static Vec4T zero() { return {T(0), T(0), T(0), T(0)}; }
+    CDM_INLINE Vec4T operator+(const Vec4T &o) const { return {r + o.r, g + o.g, b + o.b, a + o.a}; }
+    CDM_INLINE Vec4T operator-(const Vec4T &o) const { return {r - o.r, g - o.g, b - o.b, a - o.a}; }
+    CDM_INLINE Vec4T operator*(const T &s) const { return {r * s, g * s, b * s, a * s}; }
+    CDM_INLINE Vec4T &operator+=(const Vec4T &o) { r = r + o.r; g = g + o.g; b = b + o.b; a = a + o.a; return *this; }
+};
+
+template <typename T> CDM_INLINE T dot(const Vec4T<T> &x, const Vec4T<T> &y)
+{ return x.r*y.r + x.g*y.g + x.b*y.b + x.a*y.a; }
+template <typename T> CDM_INLINE T length_sq(const Vec4T<T> &v) { return dot(v, v); }
+
+template <typename T>
+struct SymMat4T
+{
+    T rr, gg, bb, aa, rg, rb, ra, gb, ga, ba;
+    CDM_INLINE static SymMat4T zero() { return {T(0),T(0),T(0),T(0),T(0),T(0),T(0),T(0),T(0),T(0)}; }
+    CDM_INLINE void accumulate_outer(const Vec4T<T> &d, const T &w)
+    {
+        rr=rr+d.r*d.r*w; gg=gg+d.g*d.g*w; bb=bb+d.b*d.b*w; aa=aa+d.a*d.a*w;
+        rg=rg+d.r*d.g*w; rb=rb+d.r*d.b*w; ra=ra+d.r*d.a*w;
+        gb=gb+d.g*d.b*w; ga=ga+d.g*d.a*w; ba=ba+d.b*d.a*w;
+    }
+    CDM_INLINE Vec4T<T> multiply(const Vec4T<T> &v) const
+    {
+        return {rr*v.r+rg*v.g+rb*v.b+ra*v.a, rg*v.r+gg*v.g+gb*v.b+ga*v.a,
+                rb*v.r+gb*v.g+bb*v.b+ba*v.a, ra*v.r+ga*v.g+ba*v.b+aa*v.a};
+    }
+};
+
+using Float4 = Vec4T<float>;
+using SymMat4 = SymMat4T<float>;
+
+CDM_INLINE Float4 compute_principal_axis(const SymMat4 &cov)
+{
+    Float4 axis = {0.5f, 0.5f, 0.5f, 0.5f};
+    for (int i = 0; i < 4; ++i)
+    {
+        Float4 next = cov.multiply(axis);
+        float n = length_sq(next);
+        if (n <= 1e-20f) return {1.0f, 0.0f, 0.0f, 0.0f};
+        axis = next * (1.0f / sqrtf(n));
+    }
+    return axis;
+}
+
 // Principal axis for scalar Float3 (Fallback for degenerate axis)
 CDM_INLINE Float3 compute_principal_axis(const SymMat3 &cov)
 {

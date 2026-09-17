@@ -16,6 +16,7 @@ enum class Format
     Unknown = 0,
     BC1,
     BC6H_UF16,
+    BC7,
 };
 
 struct Options

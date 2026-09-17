@@ -151,6 +151,14 @@ bool load_dds(const char *filepath, Image *out_image)
             case 96: // BC6H_SF16 requires signed endpoint decoding and encoding.
                 fclose(fp);
                 return false;
+            case 98:
+                out_image->format = Format::BC7;
+                out_image->is_srgb = false;
+                break;
+            case 99:
+                out_image->format = Format::BC7;
+                out_image->is_srgb = true;
+                break;
             default:
                 fclose(fp);
                 return false;
@@ -164,7 +172,7 @@ bool load_dds(const char *filepath, Image *out_image)
         return false;
     }
 
-    const size_t block_bytes = out_image->format == Format::BC6H_UF16 ? 16 : 8;
+    const size_t block_bytes = out_image->format == Format::BC1 ? 8 : 16;
     uint32_t curr_w = out_image->width;
     uint32_t curr_h = out_image->height;
     size_t total_bytes = 0;
@@ -242,7 +250,8 @@ bool save_dds(const char *filepath, const Image *image)
         fclose(fp);
         return false;
     }
-    dxt10.dxgi_format = image->format == Format::BC6H_UF16 ? 95 : (image->is_srgb ? 72 : 71);
+    dxt10.dxgi_format = image->format == Format::BC6H_UF16 ? 95 :
+        (image->format == Format::BC7 ? (image->is_srgb ? 99 : 98) : (image->is_srgb ? 72 : 71));
 
     fwrite(&dxt10, sizeof(dxt10), 1, fp);
 

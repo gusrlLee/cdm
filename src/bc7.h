@@ -925,14 +925,22 @@ template <bool Srgb> __device__ __forceinline__ void encode_half_warp(Float4 sam
             ep[1][c] = t;
         }
     }
+
+    uint8_t selectors[16];
+
+    for (int i = 0; i < 16; ++i) 
+    {
+        const uint32_t selected = __shfl_sync(mask, selector, i, 16);
+        if (lane == 0) 
+        {
+            selectors[texel_index(i)] = uint8_t(selected);
+        }
+    }
     if (lane == 0)
     {
-        uint8_t selectors[16];
-        selectors[0] = uint8_t(selector);
-        for (int i = 1; i < 16; ++i)
-            selectors[texel_index(i)] = uint8_t(__shfl_sync(mask, selector, i, 16));
         *output = pack_block(ep, selectors);
     }
+
 }
 #endif
 } // namespace bc7

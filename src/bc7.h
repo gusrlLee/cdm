@@ -14,7 +14,7 @@ template <typename T> CDM_INLINE T flat_variance(const SymMat4T<T> &cov)
 {
     return cov.rr + cov.gg + cov.bb + cov.aa;
 }
-// Mode 6 stores one RGBA endpoint pair and sixteen 4-bit selectors.
+// Raw BC7 block. Input accepts all eight modes; generated child blocks use Mode 6.
 struct Block
 {
     uint64_t low, high;
@@ -22,6 +22,8 @@ struct Block
 static_assert(sizeof(Block) == 16);
 
 using MeanImage = MeanImage4;
+
+#include "bc7_tables.inl"
 
 // ---------------------------------------------------------------------
 // Mode 6 bit layout and palette reconstruction
@@ -44,6 +46,151 @@ CDM_INLINE uint64_t get_bits(const Block &b, uint32_t bit, uint32_t count)
         return count == 64 ? value : value & ((uint64_t(1) << count) - 1);
     }
     return (b.high >> (bit - 64)) & ((uint64_t(1) << count) - 1);
+}
+
+struct SymbolicBC7
+{
+    uint8_t endpoints[6][4];
+    uint8_t subset[16];
+    uint8_t color_index[16];
+    uint8_t alpha_index[16];
+    uint8_t mode;
+    uint8_t subsets;
+    uint8_t color_bits;
+    uint8_t alpha_bits;
+    uint8_t rotation;
+    bool valid;
+};
+
+// Parse all BC7 modes without materializing an RGBA texel block.  Endpoint
+// expansion and fix-up handling follow the BPTC reference reconstruction.
+CDM_INLINE SymbolicBC7 parse_symbolic_block(const Block &block)
+{
+    constexpr uint8_t color_precision[8] = {4, 6, 5, 7, 5, 7, 7, 5};
+    constexpr uint8_t alpha_precision[8] = {0, 0, 0, 0, 6, 8, 7, 5};
+    constexpr uint8_t modes_with_pbits = 0xcb;
+    SymbolicBC7 out{};
+    uint32_t bit = 0;
+    for (; out.mode < 8 && get_bits(block, bit++, 1) == 0; ++out.mode)
+    {
+    }
+    if (out.mode >= 8)
+        return out;
+
+    out.valid = true;
+    out.subsets = (out.mode == 0 || out.mode == 2) ? 3 :
+                  (out.mode == 1 || out.mode == 3 || out.mode == 7) ? 2 : 1;
+    uint32_t partition = 0;
+    if (out.subsets > 1)
+    {
+        const uint32_t partition_bits = out.mode == 0 ? 4 : 6;
+        partition = uint32_t(get_bits(block, bit, partition_bits));
+        bit += partition_bits;
+    }
+    if (out.mode == 4 || out.mode == 5)
+    {
+        out.rotation = uint8_t(get_bits(block, bit, 2));
+        bit += 2;
+    }
+    uint32_t index_selection = 0;
+    if (out.mode == 4)
+        index_selection = uint32_t(get_bits(block, bit++, 1));
+
+    const uint32_t endpoint_count = out.subsets * 2;
+    for (uint32_t channel = 0; channel < 3; ++channel)
+        for (uint32_t endpoint = 0; endpoint < endpoint_count; ++endpoint)
+        {
+            out.endpoints[endpoint][channel] = uint8_t(get_bits(block, bit, color_precision[out.mode]));
+            bit += color_precision[out.mode];
+        }
+    if (alpha_precision[out.mode])
+        for (uint32_t endpoint = 0; endpoint < endpoint_count; ++endpoint)
+        {
+            out.endpoints[endpoint][3] = uint8_t(get_bits(block, bit, alpha_precision[out.mode]));
+            bit += alpha_precision[out.mode];
+        }
+
+    const bool has_pbits = (modes_with_pbits & (1u << out.mode)) != 0;
+    if (out.mode == 0 || out.mode == 1 || out.mode == 3 || out.mode == 6 || out.mode == 7)
+    {
+        for (uint32_t endpoint = 0; endpoint < endpoint_count; ++endpoint)
+            for (uint32_t channel = 0; channel < 4; ++channel)
+                out.endpoints[endpoint][channel] <<= 1;
+        if (out.mode == 1)
+        {
+            const uint32_t p0 = uint32_t(get_bits(block, bit++, 1));
+            const uint32_t p1 = uint32_t(get_bits(block, bit++, 1));
+            for (uint32_t channel = 0; channel < 3; ++channel)
+            {
+                out.endpoints[0][channel] |= uint8_t(p0);
+                out.endpoints[1][channel] |= uint8_t(p0);
+                out.endpoints[2][channel] |= uint8_t(p1);
+                out.endpoints[3][channel] |= uint8_t(p1);
+            }
+        }
+        else if (has_pbits)
+        {
+            for (uint32_t endpoint = 0; endpoint < endpoint_count; ++endpoint)
+            {
+                const uint8_t p = uint8_t(get_bits(block, bit++, 1));
+                for (uint32_t channel = 0; channel < 4; ++channel)
+                    out.endpoints[endpoint][channel] |= p;
+            }
+        }
+    }
+
+    const uint32_t color_precision_with_p = color_precision[out.mode] + uint32_t(has_pbits);
+    const uint32_t alpha_precision_with_p = alpha_precision[out.mode] + uint32_t(has_pbits);
+    for (uint32_t endpoint = 0; endpoint < endpoint_count; ++endpoint)
+    {
+        for (uint32_t channel = 0; channel < 3; ++channel)
+        {
+            uint32_t value = uint32_t(out.endpoints[endpoint][channel]) << (8 - color_precision_with_p);
+            out.endpoints[endpoint][channel] = uint8_t(value | (value >> color_precision_with_p));
+        }
+        if (alpha_precision[out.mode])
+        {
+            uint32_t value = uint32_t(out.endpoints[endpoint][3]) << (8 - alpha_precision_with_p);
+            out.endpoints[endpoint][3] = uint8_t(value | (value >> alpha_precision_with_p));
+        }
+        else
+            out.endpoints[endpoint][3] = 255;
+    }
+
+    out.color_bits = (out.mode == 0 || out.mode == 1) ? 3 : (out.mode == 6 ? 4 : 2);
+    out.alpha_bits = out.mode == 4 ? 3 : (out.mode == 5 ? 2 : 0);
+    for (uint32_t texel = 0; texel < 16; ++texel)
+    {
+        uint8_t partition_entry = out.subsets == 1 ? uint8_t(texel ? 0 : 128)
+                                                    : kPartitionSets[out.subsets - 2][partition][texel >> 2][texel & 3];
+        out.subset[texel] = partition_entry & 3;
+        const uint32_t count = out.color_bits - ((partition_entry & 0x80) != 0);
+        out.color_index[texel] = uint8_t(get_bits(block, bit, count));
+        bit += count;
+    }
+    if (out.alpha_bits)
+        for (uint32_t texel = 0; texel < 16; ++texel)
+        {
+            const uint32_t count = out.alpha_bits - (texel == 0);
+            out.alpha_index[texel] = uint8_t(get_bits(block, bit, count));
+            bit += count;
+        }
+
+    // Normalize the two streams so color_index always drives RGB and
+    // alpha_index always drives alpha.
+    if (out.alpha_bits && index_selection)
+    {
+        for (uint32_t texel = 0; texel < 16; ++texel)
+        {
+            const uint8_t primary = out.color_index[texel];
+            out.color_index[texel] = out.alpha_index[texel];
+            out.alpha_index[texel] = primary;
+        }
+        const uint8_t primary_bits = out.color_bits;
+        out.color_bits = out.alpha_bits;
+        out.alpha_bits = primary_bits;
+    }
+    return out;
 }
 
 CDM_INLINE void put_bits(Block &b, uint32_t bit, uint32_t count, uint64_t value)
@@ -140,6 +287,21 @@ CDM_INLINE uint8_t interpolate(uint32_t a, uint32_t b, uint32_t s)
     return uint8_t(((64 - w) * a + w * b + 32) >> 6);
 }
 
+CDM_INLINE uint8_t interpolate_with_bits(uint32_t a, uint32_t b, uint32_t selector, uint32_t bits)
+{
+    if (bits == 2)
+    {
+        constexpr uint8_t weights[4] = {0, 21, 43, 64};
+        return uint8_t(((64 - weights[selector]) * a + weights[selector] * b + 32) >> 6);
+    }
+    if (bits == 3)
+    {
+        constexpr uint8_t weights[8] = {0, 9, 18, 27, 37, 46, 55, 64};
+        return uint8_t(((64 - weights[selector]) * a + weights[selector] * b + 32) >> 6);
+    }
+    return interpolate(a, b, selector);
+}
+
 CDM_INLINE Block pack_block(const uint8_t ep8[2][4], const uint8_t selectors[16])
 {
     Block out = {0x40u, 0};
@@ -185,16 +347,50 @@ template <bool Srgb> CDM_INLINE void palette(const uint8_t ep[2][4], Float4 out[
 
 template <bool Srgb> CDM_INLINE void quadrant_means(const Block &block, Float4 out[4])
 {
-    uint8_t ep[2][4], sel[16];
-    unpack(block, ep, sel);
-    Float4 pal[16];
-    palette<Srgb>(ep, pal);
+    const SymbolicBC7 symbolic = parse_symbolic_block(block);
     for (uint32_t q = 0; q < 4; ++q)
+        out[q] = Float4::zero();
+    if (!symbolic.valid)
+        return;
+
+    struct HistogramEntry
     {
-        uint32_t x = (q & 1) * 2, y = (q >> 1) * 2;
-        out[q] = (pal[sel[y * 4 + x]] + pal[sel[y * 4 + x + 1]] + pal[sel[(y + 1) * 4 + x]] +
-                  pal[sel[(y + 1) * 4 + x + 1]]) *
-                 0.25f;
+        uint16_t key;
+        uint16_t quadrant_counts;
+    } histogram[16];
+    uint32_t entry_count = 0;
+    for (uint32_t texel = 0; texel < 16; ++texel)
+    {
+        const uint32_t x = texel & 3, y = texel >> 2;
+        const uint32_t quadrant = (x >> 1) | ((y >> 1) << 1);
+        const uint16_t key = uint16_t(symbolic.subset[texel] | (symbolic.color_index[texel] << 2) |
+                                      (symbolic.alpha_index[texel] << 6));
+        uint32_t entry = 0;
+        while (entry < entry_count && histogram[entry].key != key)
+            ++entry;
+        if (entry == entry_count)
+            histogram[entry_count++] = {key, 0};
+        histogram[entry].quadrant_counts += uint16_t(1u << (quadrant * 3));
+    }
+
+    for (uint32_t entry = 0; entry < entry_count; ++entry)
+    {
+        const uint32_t subset = histogram[entry].key & 3;
+        const uint32_t color_index = (histogram[entry].key >> 2) & 15;
+        const uint32_t alpha_index = (histogram[entry].key >> 6) & 15;
+        const uint8_t *a = symbolic.endpoints[subset * 2];
+        const uint8_t *b = symbolic.endpoints[subset * 2 + 1];
+        uint8_t rgba[4];
+        for (uint32_t channel = 0; channel < 3; ++channel)
+            rgba[channel] = interpolate_with_bits(a[channel], b[channel], color_index, symbolic.color_bits);
+        rgba[3] = symbolic.alpha_bits
+                      ? interpolate_with_bits(a[3], b[3], alpha_index, symbolic.alpha_bits)
+                      : interpolate_with_bits(a[3], b[3], color_index, symbolic.color_bits);
+        if (symbolic.rotation)
+            std::swap(rgba[3], rgba[symbolic.rotation - 1]);
+        const Float4 value = rgba8_to_linear<Srgb>(rgba);
+        for (uint32_t quadrant = 0; quadrant < 4; ++quadrant)
+            out[quadrant] += value * (float((histogram[entry].quadrant_counts >> (quadrant * 3)) & 7) * 0.25f);
     }
 }
 
@@ -575,14 +771,49 @@ template <bool Srgb> __device__ __forceinline__ Float4 device_color(const uint8_
 
 template <bool Srgb> __device__ __forceinline__ Float4 device_quadrant_mean(const Block &block, uint32_t quadrant)
 {
-    uint8_t endpoints[2][4], selectors[16];
-    unpack(block, endpoints, selectors);
-    const uint32_t x = (quadrant & 1u) * 2, y = (quadrant >> 1u) * 2;
-    return (device_color<Srgb>(endpoints, selectors[y * 4 + x]) +
-            device_color<Srgb>(endpoints, selectors[y * 4 + x + 1]) +
-            device_color<Srgb>(endpoints, selectors[(y + 1) * 4 + x]) +
-            device_color<Srgb>(endpoints, selectors[(y + 1) * 4 + x + 1])) *
-           0.25f;
+    const SymbolicBC7 symbolic = parse_symbolic_block(block);
+    if (!symbolic.valid)
+        return Float4::zero();
+    uint16_t keys[4] = {};
+    uint8_t counts[4] = {};
+    uint32_t entries = 0;
+    const uint32_t x0 = (quadrant & 1u) * 2, y0 = (quadrant >> 1u) * 2;
+    for (uint32_t dy = 0; dy < 2; ++dy)
+        for (uint32_t dx = 0; dx < 2; ++dx)
+        {
+            const uint32_t texel = (y0 + dy) * 4 + x0 + dx;
+            const uint16_t key = uint16_t(symbolic.subset[texel] | (symbolic.color_index[texel] << 2) |
+                                          (symbolic.alpha_index[texel] << 6));
+            uint32_t entry = 0;
+            while (entry < entries && keys[entry] != key)
+                ++entry;
+            if (entry == entries)
+                keys[entries++] = key;
+            ++counts[entry];
+        }
+    Float4 result = Float4::zero();
+    for (uint32_t entry = 0; entry < entries; ++entry)
+    {
+        const uint32_t subset = keys[entry] & 3, color_index = (keys[entry] >> 2) & 15;
+        const uint32_t alpha_index = (keys[entry] >> 6) & 15;
+        const uint8_t *a = symbolic.endpoints[subset * 2], *b = symbolic.endpoints[subset * 2 + 1];
+        uint8_t rgba[4];
+        for (uint32_t channel = 0; channel < 3; ++channel)
+            rgba[channel] = interpolate_with_bits(a[channel], b[channel], color_index, symbolic.color_bits);
+        rgba[3] = symbolic.alpha_bits
+                      ? interpolate_with_bits(a[3], b[3], alpha_index, symbolic.alpha_bits)
+                      : interpolate_with_bits(a[3], b[3], color_index, symbolic.color_bits);
+        if (symbolic.rotation)
+        {
+            const uint8_t tmp = rgba[3];
+            rgba[3] = rgba[symbolic.rotation - 1];
+            rgba[symbolic.rotation - 1] = tmp;
+        }
+        const Float4 value = {decode_channel<Srgb>(rgba[0]), decode_channel<Srgb>(rgba[1]),
+                              decode_channel<Srgb>(rgba[2]), rgba[3] * (1.0f / 255.0f)};
+        result += value * (float(counts[entry]) * 0.25f);
+    }
+    return result;
 }
 
 template <bool Srgb> __device__ __forceinline__ uint8_t device_quantize(float target, uint32_t pbit, bool alpha)

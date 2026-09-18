@@ -264,7 +264,17 @@ CDM_INLINE float half_to_float(uint16_t half)
     return o.f;
 }
 
-CDM_INLINE void decode_half(const void *compressedBlock, void *decompressedBlock, int destinationPitch, int isSigned)
+struct SymbolicBC6H
+{
+    int endpoints[4][3];
+    uint8_t subset[16];
+    uint8_t selector[16];
+    uint8_t selector_bits;
+    bool valid;
+};
+
+CDM_INLINE void parse_or_decode_half(const void *compressedBlock, void *decompressedBlock, int destinationPitch,
+                                     int isSigned, SymbolicBC6H *symbolic)
 {
     static char actual_bits_count[4][14] = {
         {10, 7, 11, 11, 11, 9, 8, 8, 8, 6, 10, 11, 12, 16}, /*  W */
@@ -717,6 +727,8 @@ CDM_INLINE void decode_half(const void *compressedBlock, void *decompressedBlock
            Do not use these in your encoder. If the hardware is passed blocks
            with one of these modes specified, the resulting decompressed block
            must contain all zeroes in all channels except for the alpha channel. */
+        if (!decompressed)
+            return;
         for (i = 0; i < 4; ++i)
         {
             for (j = 0; j < 4; ++j)
@@ -772,6 +784,18 @@ CDM_INLINE void decode_half(const void *compressedBlock, void *decompressedBlock
     }
 
     weights = (mode >= 10) ? aWeight4 : aWeight3;
+    if (symbolic)
+    {
+        symbolic->valid = true;
+        symbolic->selector_bits = uint8_t(mode >= 10 ? 4 : 3);
+        const int endpoint_count = (numPartitions + 1) * 2;
+        for (int endpoint = 0; endpoint < endpoint_count; ++endpoint)
+        {
+            symbolic->endpoints[endpoint][0] = r[endpoint];
+            symbolic->endpoints[endpoint][1] = g[endpoint];
+            symbolic->endpoints[endpoint][2] = b[endpoint];
+        }
+    }
     for (i = 0; i < 4; ++i)
     {
         for (j = 0; j < 4; ++j)
@@ -790,13 +814,38 @@ CDM_INLINE void decode_half(const void *compressedBlock, void *decompressedBlock
             index = read_bits(&bstream, indexBits);
 
             ep_i = partitionSet * 2;
-            decompressed[j * 3 + 0] = finish_unquantize(interpolate(r[ep_i], r[ep_i + 1], weights, index), isSigned);
-            decompressed[j * 3 + 1] = finish_unquantize(interpolate(g[ep_i], g[ep_i + 1], weights, index), isSigned);
-            decompressed[j * 3 + 2] = finish_unquantize(interpolate(b[ep_i], b[ep_i + 1], weights, index), isSigned);
+            if (symbolic)
+            {
+                const uint32_t texel = uint32_t(i * 4 + j);
+                symbolic->subset[texel] = uint8_t(partitionSet);
+                symbolic->selector[texel] = uint8_t(index);
+            }
+            else
+            {
+                decompressed[j * 3 + 0] =
+                    finish_unquantize(interpolate(r[ep_i], r[ep_i + 1], weights, index), isSigned);
+                decompressed[j * 3 + 1] =
+                    finish_unquantize(interpolate(g[ep_i], g[ep_i + 1], weights, index), isSigned);
+                decompressed[j * 3 + 2] =
+                    finish_unquantize(interpolate(b[ep_i], b[ep_i + 1], weights, index), isSigned);
+            }
         }
 
-        decompressed += destinationPitch;
+        if (!symbolic)
+            decompressed += destinationPitch;
     }
+}
+
+CDM_INLINE void decode_half(const void *compressedBlock, void *decompressedBlock, int destinationPitch, int isSigned)
+{
+    parse_or_decode_half(compressedBlock, decompressedBlock, destinationPitch, isSigned, nullptr);
+}
+
+CDM_INLINE SymbolicBC6H parse_symbolic_block(const Block &block)
+{
+    SymbolicBC6H result{};
+    parse_or_decode_half(&block, nullptr, 0, 0, &result);
+    return result;
 }
 
 CDM_INLINE uint16_t float_to_half(float value)
@@ -837,14 +886,46 @@ CDM_INLINE Float3 sanitize_hdr(const Float3 &value);
 
 CDM_INLINE void get_quadrant_means(const bc6h::Block &block, Float3 out[4])
 {
-    Float3 p[16];
-    decode_block(block, p);
-    for (int i = 0; i < 16; ++i)
-        p[i] = sanitize_hdr(p[i]);
-    for (uint32_t q = 0; q < 4; ++q)
+    const SymbolicBC6H symbolic = parse_symbolic_block(block);
+    for (uint32_t quadrant = 0; quadrant < 4; ++quadrant)
+        out[quadrant] = Float3::zero();
+    if (!symbolic.valid)
+        return;
+
+    struct HistogramEntry
     {
-        uint32_t x = (q & 1u) * 2u, y = (q >> 1u) * 2u;
-        out[q] = (p[y * 4 + x] + p[y * 4 + x + 1] + p[(y + 1) * 4 + x] + p[(y + 1) * 4 + x + 1]) * 0.25f;
+        uint8_t key;
+        uint16_t quadrant_counts;
+    } histogram[16];
+    uint32_t entry_count = 0;
+    for (uint32_t texel = 0; texel < 16; ++texel)
+    {
+        const uint32_t quadrant = ((texel & 3u) >> 1) | (((texel >> 2) >> 1) << 1);
+        const uint8_t key = uint8_t(symbolic.subset[texel] | (symbolic.selector[texel] << 1));
+        uint32_t entry = 0;
+        while (entry < entry_count && histogram[entry].key != key)
+            ++entry;
+        if (entry == entry_count)
+            histogram[entry_count++] = {key, 0};
+        histogram[entry].quadrant_counts += uint16_t(1u << (quadrant * 3));
+    }
+
+    const int weights3[8] = {0, 9, 18, 27, 37, 46, 55, 64};
+    const int weights4[16] = {0, 4, 9, 13, 17, 21, 26, 30, 34, 38, 43, 47, 51, 55, 60, 64};
+    const int *weights = symbolic.selector_bits == 4 ? weights4 : weights3;
+    for (uint32_t entry = 0; entry < entry_count; ++entry)
+    {
+        const uint32_t subset = histogram[entry].key & 1u;
+        const uint32_t selector = histogram[entry].key >> 1;
+        const int *a = symbolic.endpoints[subset * 2];
+        const int *b = symbolic.endpoints[subset * 2 + 1];
+        Float3 value = {
+            half_to_float(finish_unquantize(interpolate(a[0], b[0], weights, selector), 0)),
+            half_to_float(finish_unquantize(interpolate(a[1], b[1], weights, selector), 0)),
+            half_to_float(finish_unquantize(interpolate(a[2], b[2], weights, selector), 0))};
+        value = sanitize_hdr(value);
+        for (uint32_t quadrant = 0; quadrant < 4; ++quadrant)
+            out[quadrant] += value * (float((histogram[entry].quadrant_counts >> (quadrant * 3)) & 7) * 0.25f);
     }
 }
 
@@ -1171,35 +1252,40 @@ CDM_INLINE void generate_child_blocks_from_means_x4(const MeanImage &source, uin
 #endif
 
 #if defined(__CUDACC__)
-// Decode work is shared by four lanes; encoding assigns one sample to each
-// half-warp lane.
 __device__ __forceinline__ Float3 device_quadrant_mean(const Block &block, uint32_t quadrant)
 {
-    const unsigned mask = half_warp_mask();
-    const uint32_t source_lane = (threadIdx.x & 15u) & ~3u;
-    Float3 means[4] = {};
-    if (quadrant == 0)
-    {
-        Float3 pixels[16];
-        decode_block(block, pixels);
-        for (Float3 &pixel : pixels)
-            pixel = sanitize_hdr(pixel);
-        for (uint32_t q = 0; q < 4; ++q)
+    const SymbolicBC6H symbolic = parse_symbolic_block(block);
+    if (!symbolic.valid)
+        return Float3::zero();
+    uint8_t keys[4] = {};
+    uint8_t counts[4] = {};
+    uint32_t entries = 0;
+    const uint32_t x0 = (quadrant & 1u) * 2, y0 = (quadrant >> 1u) * 2;
+    for (uint32_t dy = 0; dy < 2; ++dy)
+        for (uint32_t dx = 0; dx < 2; ++dx)
         {
-            const uint32_t x = (q & 1u) * 2u, y = (q >> 1u) * 2u;
-            means[q] =
-                (pixels[y * 4 + x] + pixels[y * 4 + x + 1] + pixels[(y + 1) * 4 + x] + pixels[(y + 1) * 4 + x + 1]) *
-                0.25f;
+            const uint32_t texel = (y0 + dy) * 4 + x0 + dx;
+            const uint8_t key = uint8_t(symbolic.subset[texel] | (symbolic.selector[texel] << 1));
+            uint32_t entry = 0;
+            while (entry < entries && keys[entry] != key)
+                ++entry;
+            if (entry == entries)
+                keys[entries++] = key;
+            ++counts[entry];
         }
-    }
-    Float3 result{};
-    for (uint32_t q = 0; q < 4; ++q)
+    const int weights3[8] = {0, 9, 18, 27, 37, 46, 55, 64};
+    const int weights4[16] = {0, 4, 9, 13, 17, 21, 26, 30, 34, 38, 43, 47, 51, 55, 60, 64};
+    const int *weights = symbolic.selector_bits == 4 ? weights4 : weights3;
+    Float3 result = Float3::zero();
+    for (uint32_t entry = 0; entry < entries; ++entry)
     {
-        Float3 value = means[q];
-        value = {__shfl_sync(mask, value.r, source_lane, 16), __shfl_sync(mask, value.g, source_lane, 16),
-                 __shfl_sync(mask, value.b, source_lane, 16)};
-        if (quadrant == q)
-            result = value;
+        const uint32_t subset = keys[entry] & 1u, selector = keys[entry] >> 1;
+        const int *a = symbolic.endpoints[subset * 2], *b = symbolic.endpoints[subset * 2 + 1];
+        Float3 value = {
+            half_to_float(finish_unquantize(interpolate(a[0], b[0], weights, selector), 0)),
+            half_to_float(finish_unquantize(interpolate(a[1], b[1], weights, selector), 0)),
+            half_to_float(finish_unquantize(interpolate(a[2], b[2], weights, selector), 0))};
+        result += sanitize_hdr(value) * (float(counts[entry]) * 0.25f);
     }
     return result;
 }

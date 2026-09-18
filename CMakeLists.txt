@@ -13,6 +13,7 @@ add_executable(
     src/bc1.h
     src/bc6h.h
     src/bc7.h
+    src/bc7_tables.inl
     src/main.cpp
     src/dds.cpp
     src/cpu.cpp
@@ -22,7 +23,7 @@ add_executable(
 set_target_properties(${PROJECT_NAME} PROPERTIES
     CUDA_STANDARD 17
     CUDA_STANDARD_REQUIRED ON
-    CUDA_ARCHITECTURES native
+    CUDA_ARCHITECTURES 86 # For 3060, native For 5070
 )
 
 if(MSVC)

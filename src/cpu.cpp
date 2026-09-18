@@ -346,17 +346,6 @@ bool generate_mipmaps(Image *image, const Options &options)
 {
     if (!image || !image->data || image->format == Format::Unknown)
         return false;
-    if (image->format == Format::BC7)
-    {
-        const auto *blocks = reinterpret_cast<const bc7::Block *>(image->data + image->mips[0].byte_offset);
-        const size_t count = size_t(image->mips[0].block_count_x) * image->mips[0].block_count_y;
-        for (size_t i = 0; i < count; ++i)
-            if (!bc7::is_mode6(blocks[i]))
-            {
-                std::fprintf(stderr, "BC7 input block %zu is not Mode 6.\n", i);
-                return false;
-            }
-    }
     switch (options.backend)
     {
     case Backend::CPU:

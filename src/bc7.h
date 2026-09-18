@@ -161,8 +161,13 @@ CDM_INLINE SymbolicBC7 parse_symbolic_block(const Block &block)
     out.alpha_bits = out.mode == 4 ? 3 : (out.mode == 5 ? 2 : 0);
     for (uint32_t texel = 0; texel < 16; ++texel)
     {
-        uint8_t partition_entry = out.subsets == 1 ? uint8_t(texel ? 0 : 128)
-                                                    : kPartitionSets[out.subsets - 2][partition][texel >> 2][texel & 3];
+        uint8_t partition_entry = uint8_t(texel ? 0 : 128);
+        if (out.subsets > 1)
+        {
+#if defined(__CUDA_ARCH__) || !defined(__CUDACC__)
+            partition_entry = kPartitionSets[out.subsets - 2][partition][texel >> 2][texel & 3];
+#endif
+        }
         out.subset[texel] = partition_entry & 3;
         const uint32_t count = out.color_bits - ((partition_entry & 0x80) != 0);
         out.color_index[texel] = uint8_t(get_bits(block, bit, count));

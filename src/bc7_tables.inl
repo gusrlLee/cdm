@@ -1,4 +1,8 @@
+#if defined(__CUDACC__)
+static __device__ __constant__ uint8_t kPartitionSets[2][64][4][4] = {
+#else
 static constexpr uint8_t kPartitionSets[2][64][4][4] = {
+#endif
         {   /* Partition table for 2-subset BPTC */
             { {128, 0,   1, 1}, {0, 0,   1, 1}, {  0, 0, 1, 1}, {0, 0, 1, 129} }, /*  0 */
             { {128, 0,   0, 1}, {0, 0,   0, 1}, {  0, 0, 0, 1}, {0, 0, 0, 129} }, /*  1 */
@@ -134,4 +138,3 @@ static constexpr uint8_t kPartitionSets[2][64][4][4] = {
     };
 
     
-

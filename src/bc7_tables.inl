@@ -1,4 +1,4 @@
-#if defined(__CUDACC__)
+#if defined(__CUDA_ARCH__)
 static __device__ __constant__ uint8_t kPartitionSets[2][64][4][4] = {
 #else
 static constexpr uint8_t kPartitionSets[2][64][4][4] = {

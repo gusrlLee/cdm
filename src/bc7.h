@@ -5,6 +5,7 @@
 #include <cfloat>
 #include <cstddef>
 #include <cstdint>
+#include <array>
 
 namespace bc7
 {
@@ -14,6 +15,26 @@ template <typename T> CDM_INLINE T flat_variance(const SymMat4T<T> &cov)
 {
     return cov.rr + cov.gg + cov.bb + cov.aa;
 }
+
+// cov is normalized by the number of samples in this group 
+CDM_INLINE float estimate_rgb_line_sse(const SymMat4 &cov, const Float4 &axis, uint32_t sample_count)
+{
+    const Float4 rgb_axis = {axis.r, axis.g, axis.b, 0.0f};
+    const float total = cov.rr + cov.gg + cov.bb;
+    const float along_axis = dot(rgb_axis, cov.multiply(rgb_axis));
+    const float residual = total - along_axis;
+    return sample_count * (residual > 0.0f ? residual : 0.0f);
+}
+
+CDM_INLINE float estimate_rgb_index_sse(const Float4 &low, const Float4 &high, uint32_t sample_count, uint32_t index_levels)
+{
+    const Float4 span = high - low;
+    const float span_sq = span.r * span.r + span.g * span.g + span.b * span.b;
+    const float  steps = float(index_levels - 1);
+
+    return float(sample_count) * span_sq / (12.0f * steps * steps);
+}
+
 // Raw BC7 block. Input accepts all eight modes; generated child blocks use Mode 6.
 struct Block
 {
@@ -364,6 +385,7 @@ template <bool Srgb> CDM_INLINE void quadrant_means(const Block &block, Float4 o
         uint16_t quadrant_counts;
     } histogram[16];
     uint32_t entry_count = 0;
+
     for (uint32_t texel = 0; texel < 16; ++texel)
     {
         const uint32_t x = texel & 3, y = texel >> 2;
@@ -445,15 +467,365 @@ template <bool Srgb> CDM_INLINE void quantize_endpoint(const Float4 &v, uint8_t 
     }
 }
 
+CDM_INLINE uint16_t desired_partition_mask(const Float4 samples[16], const Float4 &mean, const Float4 &axis)
+{
+    uint16_t mask = 0;
+    for (uint32_t i = 0; i < 16; i++)
+    {
+        const Float4 delta = samples[i] - mean;
+        const float projection = delta.r * axis.r + delta.g * axis.g + delta.b * axis.b;
+        mask |= uint16_t(projection > 0.0f) << texel_index(i);
+    }
+
+    return mask;
+}
+
+static constexpr std::array<uint16_t, 64> kPartitionMasks2 = []{
+    std::array<uint16_t, 64> masks{};
+    for (uint32_t p = 0; p < 64; p++)
+    {
+        for (uint32_t t = 0; t < 16; t++)
+        {
+            masks[p] |= uint16_t(kPartitionSets[0][p][t >> 2][t & 3] & 1u) << t;
+        }
+    }
+
+    return masks;
+}();
+
+CDM_INLINE uint32_t popcount16(uint32_t x)
+{
+    x -= (x >> 1) & 0x5555u;
+    x = (x & 0x3333u) + ((x >> 2) & 0x3333u);
+    x = (x + (x >> 4)) & 0x0f0fu;
+    return (x + (x >> 8)) & 0x1fu;
+}
+
+CDM_INLINE uint32_t choose_mode1_partition(uint16_t desired)
+{
+    uint32_t best_partition = 0;
+    uint32_t best_distance = 17;
+    for (uint32_t p = 0; p < 64; ++p)
+    {
+        const uint32_t distance = popcount16(desired ^ kPartitionMasks2[p]);
+        const uint32_t match = std::min(distance, 16u - distance);
+        if (match < best_distance)
+        {
+            best_distance = match;
+            best_partition = p;
+            if (match == 0)
+                break;
+        }
+    }
+    return best_partition;
+}
+
+struct Mode1SubsetStats
+{
+    uint32_t count;
+    Float4 mean;
+    SymMat4 cov;
+    Float4 axis;
+    float lo, hi;
+};
+
+CDM_INLINE void compute_mode1_subset_stats(const Float4 samples[16], uint32_t partition, Mode1SubsetStats out[2])
+{
+    out[0] = {};
+    out[1] = {};
+    const uint16_t mask = kPartitionMasks2[partition];
+
+    for (uint32_t i = 0; i < 16; ++i)
+    {
+        const uint32_t subset = (mask >> texel_index(i)) & 1u;
+        out[subset].mean += samples[i];
+        ++out[subset].count;
+    }
+    for (uint32_t s = 0; s < 2; ++s)
+        out[s].mean = out[s].mean * (1.0f / float(out[s].count));
+
+    for (uint32_t i = 0; i < 16; ++i)
+    {
+        const uint32_t subset = (mask >> texel_index(i)) & 1u;
+        out[subset].cov.accumulate_outer(
+            samples[i] - out[subset].mean, 1.0f / float(out[subset].count));
+    }
+
+    for (uint32_t s = 0; s < 2; ++s)
+    {
+        out[s].axis = compute_principal_axis(out[s].cov);
+        out[s].lo = 1e30f;
+        out[s].hi = -1e30f;
+    }
+
+    for (uint32_t i = 0; i < 16; ++i)
+    {
+        const uint32_t subset = (mask >> texel_index(i)) & 1u;
+        const float p = dot(samples[i] - out[subset].mean, out[subset].axis);
+        out[subset].lo = std::min(out[subset].lo, p);
+        out[subset].hi = std::max(out[subset].hi, p);
+    }
+}
+
+CDM_INLINE float estimate_rgb_endpoint_sse(uint32_t sample_count, uint32_t endpoint_levels, uint32_t index_levels)
+{
+    const float step = 1.0f / float(endpoint_levels - 1);
+    const float levels = float(index_levels);
+    const float endpoint_weight = (2.0f * levels - 1.0f) / (3.0f * (levels - 1.0f));
+
+    return float(sample_count) * 3.0f * step * step * endpoint_weight / 12.0f;
+}
+
+CDM_INLINE float estimate_mode1_sse(const Mode1SubsetStats stats[2])
+{
+    float error = 0.0f;
+    for (uint32_t s = 0; s < 2; ++s)
+    {
+        const Float4 low = clamp4(stats[s].mean + stats[s].axis * stats[s].lo);
+        const Float4 high = clamp4(stats[s].mean + stats[s].axis * stats[s].hi);
+
+        error += estimate_rgb_line_sse(stats[s].cov, stats[s].axis, stats[s].count);
+        error += estimate_rgb_index_sse(low, high, stats[s].count, 8);
+        error += estimate_rgb_endpoint_sse(stats[s].count, 64, 8);
+    }
+
+    return error;
+}
+
+CDM_INLINE float estimate_mode6_sse(const SymMat4 &cov, const Float4 &axis, const Float4 &low, const Float4 &high)
+{
+    return estimate_rgb_line_sse(cov, axis, 16) + estimate_rgb_index_sse(low, high, 16, 16) + estimate_rgb_endpoint_sse(16, 128, 16);
+}
+
+// ep6 order: subset 0 low/high, subset 1 low/high.
+// Fix-up texels must have selectors below 4.
+CDM_INLINE Block pack_mode1(uint32_t partition, const uint8_t ep6[4][3], const uint8_t pbit[2], const uint8_t selector[16])
+{
+    Block out = {0x2u, 0}; // BC7 mode 1: binary prefix 10
+    uint32_t bit = 2;
+
+    put_bits(out, bit, 6, partition);
+    bit += 6;
+
+    for (uint32_t c = 0; c < 3; ++c)
+        for (uint32_t e = 0; e < 4; ++e)
+        {
+            put_bits(out, bit, 6, ep6[e][c]);
+            bit += 6;
+        }
+
+    put_bits(out, bit++, 1, pbit[0]);
+    put_bits(out, bit++, 1, pbit[1]);
+
+    for (uint32_t t = 0; t < 16; ++t)
+    {
+        const uint8_t entry = kPartitionSets[0][partition][t >> 2][t & 3];
+        const uint32_t count = 3u - uint32_t((entry & 0x80u) != 0);
+        put_bits(out, bit, count, selector[t]);
+        bit += count;
+    }
+    return out;
+}
+
+CDM_INLINE void fix_mode1_anchors(uint32_t partition, uint8_t ep6[4][3], uint8_t selector[16])
+{
+    const uint16_t mask = kPartitionMasks2[partition];
+
+    for (uint32_t t = 0; t < 16; ++t)
+    {
+        const uint8_t entry = kPartitionSets[0][partition][t >> 2][t & 3];
+        if (!(entry & 0x80u) || selector[t] < 4)
+            continue;
+
+        const uint32_t subset = entry & 1u;
+        for (uint32_t c = 0; c < 3; ++c)
+            std::swap(ep6[subset * 2][c], ep6[subset * 2 + 1][c]);
+
+        for (uint32_t q = 0; q < 16; ++q)
+            if (((mask >> q) & 1u) == subset)
+                selector[q] = uint8_t(7 - selector[q]);
+    }
+}
+
+template <bool Srgb>
+CDM_INLINE float mode1_endpoint_value(uint32_t q, uint32_t pbit)
+{
+    const uint32_t code7 = (q << 1) | pbit;
+    const uint32_t code8 = (code7 << 1) | (code7 >> 6);
+    if constexpr (Srgb)
+        return bc1::c_srgb_to_linear[code8];
+    return float(code8) * (1.0f / 255.0f);
+}
+
+template <bool Srgb>
+CDM_INLINE uint8_t quantize_mode1_component(float target, uint32_t pbit)
+{
+    uint32_t left = 0, right = 64;
+    while (left < right)
+    {
+        const uint32_t mid = (left + right) >> 1;
+        if (mode1_endpoint_value<Srgb>(mid, pbit) < target)
+            left = mid + 1;
+        else
+            right = mid;
+    }
+
+    uint32_t q = left < 64 ? left : 63;
+    if (q > 0)
+    {
+        const float upper = mode1_endpoint_value<Srgb>(q, pbit) - target;
+        const float lower = mode1_endpoint_value<Srgb>(q - 1, pbit) - target;
+        if (lower * lower < upper * upper)
+            --q;
+    }
+    return uint8_t(q);
+}
+
+template <bool Srgb>
+CDM_INLINE void quantize_mode1_subset(const Float4 &low, const Float4 &high, uint8_t ep6[2][3], uint8_t &pbit)
+{
+    const float target[2][3] = {
+        {low.r, low.g, low.b},
+        {high.r, high.g, high.b}
+    };
+
+    float best_error = FLT_MAX;
+    for (uint32_t p = 0; p < 2; ++p)
+    {
+        uint8_t candidate[2][3];
+        float error = 0.0f;
+
+        for (uint32_t e = 0; e < 2; ++e)
+        {
+            for (uint32_t c = 0; c < 3; ++c)
+            {
+                candidate[e][c] =
+                    quantize_mode1_component<Srgb>(target[e][c], p);
+                const float value =
+                    mode1_endpoint_value<Srgb>(candidate[e][c], p);
+                const float delta = value - target[e][c];
+                error += delta * delta;
+            }
+        }
+
+        if (error < best_error)
+        {
+            best_error = error;
+            pbit = uint8_t(p);
+            for (uint32_t e = 0; e < 2; ++e)
+                for (uint32_t c = 0; c < 3; ++c)
+                    ep6[e][c] = candidate[e][c];
+        }
+    }
+}
+
+template <bool Srgb>
+CDM_INLINE void quantize_mode1_endpoints(const Mode1SubsetStats stats[2], uint8_t ep6[4][3], uint8_t pbit[2])
+{
+    for (uint32_t s = 0; s < 2; ++s)
+    {
+        const Float4 low = clamp4(stats[s].mean + stats[s].axis * stats[s].lo);
+        const Float4 high = clamp4(stats[s].mean + stats[s].axis * stats[s].hi);
+
+        quantize_mode1_subset<Srgb>(low, high, ep6 + s * 2, pbit[s]);
+    }
+}
+
+template <bool Srgb>
+CDM_INLINE void assign_mode1_selectors(
+    const Float4 samples[16], uint32_t partition,
+    const Mode1SubsetStats stats[2],
+    const uint8_t ep6[4][3], const uint8_t pbit[2],
+    uint8_t selector[16])
+{
+    uint8_t ep8[4][3];
+    for (uint32_t e = 0; e < 4; ++e)
+    {
+        for (uint32_t c = 0; c < 3; ++c)
+        {
+            const uint32_t code7 = (uint32_t(ep6[e][c]) << 1) | pbit[e >> 1];
+            ep8[e][c] = uint8_t((code7 << 1) | (code7 >> 6));
+        }
+    }
+
+    float projection[2][8];
+    for (uint32_t s = 0; s < 2; ++s)
+    {
+        for (uint32_t index = 0; index < 8; ++index)
+        {
+            uint8_t rgba[4] = {0, 0, 0, 255};
+            for (uint32_t c = 0; c < 3; ++c)
+                rgba[c] = interpolate_with_bits(ep8[s * 2][c], ep8[s * 2 + 1][c], index, 3);
+
+            const Float4 color = rgba8_to_linear<Srgb>(rgba);
+            projection[s][index] = dot(color - stats[s].mean, stats[s].axis);
+        }
+    }
+
+    const uint16_t mask = kPartitionMasks2[partition];
+    for (uint32_t i = 0; i < 16; ++i)
+    {
+        const uint32_t texel = texel_index(i);
+        const uint32_t subset = (mask >> texel) & 1u;
+        const float target = dot(samples[i] - stats[subset].mean, stats[subset].axis);
+
+        float best_error = FLT_MAX;
+        uint32_t best = 0;
+        for (uint32_t index = 0; index < 8; ++index)
+        {
+            const float delta = target - projection[subset][index];
+            const float error = delta * delta;
+            if (error < best_error)
+            {
+                best_error = error;
+                best = index;
+            }
+        }
+        selector[texel] = uint8_t(best);
+    }
+}
+
+template <bool Srgb>
+CDM_INLINE Block encode_mode1_samples(const Float4 samples[16], uint32_t partition, const Mode1SubsetStats stats[2])
+{
+    uint8_t ep6[4][3];
+    uint8_t pbit[2];
+    uint8_t selector[16];
+
+    quantize_mode1_endpoints<Srgb>(stats, ep6, pbit);
+    assign_mode1_selectors<Srgb>(samples, partition, stats, ep6, pbit, selector);
+    fix_mode1_anchors(partition, ep6, selector);
+    return pack_mode1(partition, ep6, pbit, selector);
+}
+
+
+CDM_INLINE bool prefer_mode1(
+    const Float4 samples[16], const Float4 &mean,
+    const SymMat4 &cov, const Float4 &axis,
+    const Float4 &low, const Float4 &high, bool flat,
+    uint32_t &partition, Mode1SubsetStats stats[2])
+{
+    if (flat) return false;
+
+    const float mode6_error = estimate_mode6_sse(cov, axis, low, high);
+    const uint16_t desired = desired_partition_mask(samples, mean, axis);
+    partition = choose_mode1_partition(desired);
+    compute_mode1_subset_stats(samples, partition, stats);
+
+    return estimate_mode1_sse(stats) < mode6_error;
+}
+
 template <bool Srgb> CDM_INLINE Block encode_samples(const Float4 samples[16])
 {
     Float4 mean = Float4::zero();
     for (int i = 0; i < 16; ++i)
         mean += samples[i];
+    
     mean = mean * (1.0f / 16.0f);
     SymMat4 cov = SymMat4::zero();
     for (int i = 0; i < 16; ++i)
         cov.accumulate_outer(samples[i] - mean, 1.0f / 16.0f);
+    
     const bool flat = flat_variance(cov) < kFlatVarianceEpsilon;
     Float4 axis = compute_principal_axis(cov);
     float lo = 1e30f, hi = -1e30f;
@@ -463,22 +835,35 @@ template <bool Srgb> CDM_INLINE Block encode_samples(const Float4 samples[16])
         lo = std::min(lo, p);
         hi = std::max(hi, p);
     }
+    
     Float4 endpoints[2] = {mean, mean};
     if (!flat)
     {
         endpoints[0] = mean + axis * lo;
         endpoints[1] = mean + axis * hi;
     }
+    
     endpoints[0] = clamp4(endpoints[0]);
     endpoints[1] = clamp4(endpoints[1]);
+    
+    uint32_t partition;
+    Mode1SubsetStats mode1_stats[2];
+    if (prefer_mode1(samples, mean, cov, axis, endpoints[0], endpoints[1], flat, partition, mode1_stats)) 
+    {
+        return encode_mode1_samples<Srgb>(samples, partition, mode1_stats);
+    }
+
     uint8_t ep[2][4];
     quantize_endpoint<Srgb>(endpoints[0], ep[0]);
     quantize_endpoint<Srgb>(endpoints[1], ep[1]);
+    
     Float4 pal[16];
     palette<Srgb>(ep, pal);
     float palette_projection[16];
+    
     for (uint32_t s = 0; s < 16; ++s)
         palette_projection[s] = dot(pal[s] - mean, axis);
+    
     uint8_t selector[16] = {};
     for (uint32_t i = 0; i < 16; ++i)
     {
@@ -497,6 +882,7 @@ template <bool Srgb> CDM_INLINE Block encode_samples(const Float4 samples[16])
         }
         selector[texel] = uint8_t(best);
     }
+    
     if (selector[0] >= 8)
     {
         for (int c = 0; c < 4; ++c)
@@ -713,6 +1099,7 @@ CDM_INLINE void generate_from_means_x4(const MeanImage &m, uint32_t bx, uint32_t
     for (uint32_t lane = lanes; lane < 4; ++lane)
         for (int i = 0; i < 16; ++i)
             s[lane][i] = s[0][i];
+    
     Block encoded[4];
     if (srgb)
         encode_samples_x4<true>(s, encoded);

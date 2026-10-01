@@ -261,6 +261,7 @@ void process_rows(const Image *image, const MipLevel &previous, const MipLevel &
     using Block = typename Codec::Block;
     const Block *source = reinterpret_cast<const Block *>(image->data + previous.byte_offset);
     Block *destination = reinterpret_cast<Block *>(image->data + current.byte_offset);
+    
     for (uint32_t by = begin; by < end; ++by)
     {
         Block *output = destination + size_t(by) * current.block_count_x;
@@ -306,10 +307,13 @@ template <typename Codec, bool Simd> bool generate_cpu(Image *image)
     const size_t base_count = size_t(bw) * bh, scratch_count = size_t(sw) * sh;
     std::unique_ptr<float[]> base(new (std::nothrow) float[base_count * MeanImage::channel_count]);
     std::unique_ptr<float[]> scratch_data(new (std::nothrow) float[scratch_count * MeanImage::channel_count]);
+
     if (!base || !scratch_data)
         return false;
+    
     MeanImage means = make_mean_image<MeanImage>(base.get(), base_count, bw, bh);
     MeanImage scratch = make_mean_image<MeanImage>(scratch_data.get(), scratch_count, sw, sh);
+    
     for (uint32_t level = 1; level < image->mip_count; ++level)
     {
         const MipLevel previous = image->mips[level - 1], current = image->mips[level];
@@ -323,6 +327,7 @@ template <typename Codec, bool Simd> bool generate_cpu(Image *image)
         auto rows = [image, previous, current, level, &means](uint32_t begin, uint32_t end) {
             process_rows<Codec, Simd>(image, previous, current, level, means, begin, end);
         };
+
         g_dispatcher.parallel_rows(current.block_count_y, size_t(current.block_count_x) * current.block_count_y, rows);
     }
     return true;

@@ -1014,13 +1014,16 @@ CDM_INLINE Block encode_with_endpoints(const Float4 samples[16], Float4 p0, Floa
         }
         selector[texel_index(i)] = uint8_t(best);
     }
+
     if (selector[0] >= 8)
     {
         for (int c = 0; c < 4; ++c)
             std::swap(ep[0][c], ep[1][c]);
+            
         for (auto &s : selector)
             s = uint8_t(15 - s);
     }
+
     return pack_block(ep, selector);
 }
 

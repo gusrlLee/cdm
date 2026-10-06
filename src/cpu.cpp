@@ -1,4 +1,8 @@
 #include "bc1.h"
+#include "bc2.h"
+#include "bc3.h"
+#include "bc4.h"
+#include "bc5.h"
 #include "bc6h.h"
 #include "bc7.h"
 #include "mip.h"
@@ -159,8 +163,17 @@ MeanImage make_mean_image(float *storage, size_t capacity, uint32_t width, uint3
 {
     if constexpr (MeanImage::channel_count == 3)
         return {storage, storage + capacity, storage + capacity * 2, width, height};
-    else
+    else if constexpr (MeanImage::channel_count == 4)
         return {storage, storage + capacity, storage + capacity * 2, storage + capacity * 3, width, height};
+    else
+    {
+        MeanImage result{};
+        for (uint32_t c = 0; c < MeanImage::channel_count; ++c)
+            result.planes[c] = storage + capacity * c;
+        result.width = width;
+        result.height = height;
+        return result;
+    }
 }
 
 template <bool Simd, typename MeanImage> void downsample_means(const MeanImage &source, const MeanImage &destination)
@@ -253,6 +266,72 @@ struct Bc7Codec
     }
 };
 
+// BC2--BC5 use the same parent/quadrant and mean-pyramid scheduling as BC1.
+template <typename Operations> struct ChannelCodec
+{
+    using Block = typename Operations::Block;
+    using Color = typename Operations::Color;
+    using MeanImage = typename Operations::MeanImage;
+
+    static void child_samples(const Block &a, const Block &b, const Block &c, const Block &d, bool srgb,
+                              Color samples[16], Color means[4], uint32_t w, uint32_t h)
+    {
+        Operations::quadrant_means(a, srgb, samples);
+        Operations::quadrant_means(b, srgb, samples + 4);
+        Operations::quadrant_means(c, srgb, samples + 8);
+        Operations::quadrant_means(d, srgb, samples + 12);
+        for (uint32_t p = 0; p < 4; ++p)
+            means[p] = (samples[p * 4] + samples[p * 4 + 1] + samples[p * 4 + 2] + samples[p * 4 + 3]) * 0.25f;
+        repeat_small_samples(samples, w, h);
+    }
+    static Block child(const Block &a, const Block &b, const Block &c, const Block &d, bool srgb, Color means[4],
+                       uint32_t w, uint32_t h)
+    {
+        Color samples[16];
+        child_samples(a, b, c, d, srgb, samples, means, w, h);
+        return Operations::encode_samples(samples, srgb);
+    }
+    static void mean_samples(const MeanImage &m, uint32_t x, uint32_t y, Color samples[16], uint32_t w, uint32_t h)
+    {
+        for (uint32_t i = 0; i < 16; ++i)
+        {
+            const uint32_t t = texel_index(i);
+            samples[i] = m.get(repeat_small_coordinate(x * 4 + (t & 3u), w),
+                               repeat_small_coordinate(y * 4 + (t >> 2), h));
+        }
+    }
+    static Block from_means(const MeanImage &m, uint32_t x, uint32_t y, bool srgb, uint32_t w, uint32_t h)
+    {
+        Color samples[16];
+        mean_samples(m, x, y, samples, w, h);
+        return Operations::encode_samples(samples, srgb);
+    }
+    static void children_x4(const Block *r0, const Block *r1, Block *out, const MeanImage &m, uint32_t x,
+                            uint32_t y0, uint32_t y1, bool srgb, uint32_t w, uint32_t h)
+    {
+        Color samples[4][16];
+        for (uint32_t lane = 0; lane < 4; ++lane)
+        {
+            Color means[4];
+            child_samples(r0[lane * 2], r0[lane * 2 + 1], r1[lane * 2], r1[lane * 2 + 1],
+                          srgb, samples[lane], means, w, h);
+            for (uint32_t p = 0; p < 4; ++p)
+                m.set(x + lane * 2 + (p & 1u), p & 2u ? y1 : y0, means[p]);
+        }
+        Operations::encode_samples_x4(samples, out, srgb);
+    }
+    static void from_means_x4(const MeanImage &m, uint32_t x, uint32_t y, uint32_t lanes, Block *out, bool srgb,
+                              uint32_t w, uint32_t h)
+    {
+        Color samples[4][16];
+        for (uint32_t lane = 0; lane < 4; ++lane)
+            mean_samples(m, x + std::min(lane, lanes - 1), y, samples[lane], w, h);
+        Block encoded[4];
+        Operations::encode_samples_x4(samples, encoded, srgb);
+        for (uint32_t lane = 0; lane < lanes; ++lane) out[lane] = encoded[lane];
+    }
+};
+
 // Codec adapters keep format-specific calls out of the shared scheduling loop.
 template <typename Codec, bool Simd>
 void process_rows(const Image *image, const MipLevel &previous, const MipLevel &current, uint32_t level,
@@ -339,6 +418,18 @@ template <bool Simd> bool dispatch_cpu(Image *image)
     {
     case Format::BC1:
         return generate_cpu<Bc1Codec, Simd>(image);
+    case Format::BC2:
+        return generate_cpu<ChannelCodec<bc2::Codec>, Simd>(image);
+    case Format::BC3:
+        return generate_cpu<ChannelCodec<bc3::Codec>, Simd>(image);
+    case Format::BC4_UNORM:
+        return generate_cpu<ChannelCodec<bc4::Codec<false>>, Simd>(image);
+    case Format::BC4_SNORM:
+        return generate_cpu<ChannelCodec<bc4::Codec<true>>, Simd>(image);
+    case Format::BC5_UNORM:
+        return generate_cpu<ChannelCodec<bc5::Codec<false>>, Simd>(image);
+    case Format::BC5_SNORM:
+        return generate_cpu<ChannelCodec<bc5::Codec<true>>, Simd>(image);
     case Format::BC6H_UF16:
         return generate_cpu<Bc6hCodec, Simd>(image);
     case Format::BC7:

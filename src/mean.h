@@ -29,11 +29,11 @@ CDM_INLINE uint32_t repeat_small_sample(uint32_t sample, uint32_t width, uint32_
     return ((y >> 1) * 2 + (x >> 1)) * 4 + (y & 1u) * 2 + (x & 1u);
 }
 
-template <typename T> CDM_INLINE void repeat_small_samples(Vec3T<T> samples[16], uint32_t width, uint32_t height)
+template <typename Color> CDM_INLINE void repeat_small_samples(Color samples[16], uint32_t width, uint32_t height)
 {
     if (width >= 4 && height >= 4)
         return;
-    Vec3T<T> original[16];
+    Color original[16];
     for (uint32_t i = 0; i < 16; ++i)
         original[i] = samples[i];
     for (uint32_t i = 0; i < 16; ++i)
@@ -94,5 +94,32 @@ struct MeanImage4
         g[index] = value.g;
         b[index] = value.b;
         a[index] = value.a;
+    }
+};
+
+// BC4/BC5 retain only their stored channels; Float3 reuses the existing sample math.
+template <uint32_t Channels> struct MeanImageChannels
+{
+    static_assert(Channels == 1 || Channels == 2);
+    static constexpr uint32_t channel_count = Channels;
+    float *planes[Channels] = {};
+    uint32_t width = 0, height = 0;
+
+    CDM_INLINE float *channel(uint32_t index) const { return planes[index]; }
+    CDM_INLINE Float3 get(uint32_t x, uint32_t y) const
+    {
+        x = x < width ? x : width - 1;
+        y = y < height ? y : height - 1;
+        const size_t i = size_t(y) * width + x;
+        if constexpr (Channels == 2)
+            return {planes[0][i], planes[1][i], 0.0f};
+        return {planes[0][i], 0.0f, 0.0f};
+    }
+    CDM_INLINE void set(uint32_t x, uint32_t y, const Float3 &value) const
+    {
+        const size_t i = size_t(y) * width + x;
+        planes[0][i] = value.r;
+        if constexpr (Channels == 2)
+            planes[1][i] = value.g;
     }
 };

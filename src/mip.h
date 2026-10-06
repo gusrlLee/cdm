@@ -17,7 +17,33 @@ enum class Format
     BC1,
     BC6H_UF16,
     BC7,
+    BC2,
+    BC3,
+    BC4_UNORM,
+    BC4_SNORM,
+    BC5_UNORM,
+    BC5_SNORM,
 };
+
+constexpr size_t block_size(Format format)
+{
+    switch (format)
+    {
+    case Format::BC1:
+    case Format::BC4_UNORM:
+    case Format::BC4_SNORM:
+        return 8;
+    case Format::BC2:
+    case Format::BC3:
+    case Format::BC5_UNORM:
+    case Format::BC5_SNORM:
+    case Format::BC6H_UF16:
+    case Format::BC7:
+        return 16;
+    default:
+        return 0;
+    }
+}
 
 struct Options
 {

@@ -11,6 +11,10 @@ add_executable(
     src/base.h
     src/mean.h
     src/bc1.h
+    src/bc2.h
+    src/bc3.h
+    src/bc4.h
+    src/bc5.h
     src/bc6h.h
     src/bc7.h
     src/bc7_tables.inl

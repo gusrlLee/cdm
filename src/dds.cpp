@@ -116,6 +116,20 @@ bool load_dds(const char *filepath, Image *out_image)
         {
             out_image->format = Format::BC1;
         }
+        else if (header.ddspf.four_cc == MakeFourCC('D', 'X', 'T', '3'))
+            out_image->format = Format::BC2;
+        else if (header.ddspf.four_cc == MakeFourCC('D', 'X', 'T', '5'))
+            out_image->format = Format::BC3;
+        else if (header.ddspf.four_cc == MakeFourCC('A', 'T', 'I', '1') ||
+                 header.ddspf.four_cc == MakeFourCC('B', 'C', '4', 'U'))
+            out_image->format = Format::BC4_UNORM;
+        else if (header.ddspf.four_cc == MakeFourCC('B', 'C', '4', 'S'))
+            out_image->format = Format::BC4_SNORM;
+        else if (header.ddspf.four_cc == MakeFourCC('A', 'T', 'I', '2') ||
+                 header.ddspf.four_cc == MakeFourCC('B', 'C', '5', 'U'))
+            out_image->format = Format::BC5_UNORM;
+        else if (header.ddspf.four_cc == MakeFourCC('B', 'C', '5', 'S'))
+            out_image->format = Format::BC5_SNORM;
         else if (header.ddspf.four_cc == MakeFourCC('D', 'X', '1', '0'))
         {
             DdsHeaderDxt10 dxt10;
@@ -146,6 +160,28 @@ bool load_dds(const char *filepath, Image *out_image)
                 out_image->format = Format::BC6H_UF16;
                 out_image->is_srgb = false;
                 break;
+            case 74:
+            case 75:
+                out_image->format = Format::BC2;
+                out_image->is_srgb = dxt10.dxgi_format == 75;
+                break;
+            case 77:
+            case 78:
+                out_image->format = Format::BC3;
+                out_image->is_srgb = dxt10.dxgi_format == 78;
+                break;
+            case 80:
+                out_image->format = Format::BC4_UNORM;
+                break;
+            case 81:
+                out_image->format = Format::BC4_SNORM;
+                break;
+            case 83:
+                out_image->format = Format::BC5_UNORM;
+                break;
+            case 84:
+                out_image->format = Format::BC5_SNORM;
+                break;
             case 96: // BC6H_SF16 requires signed endpoint decoding and encoding.
                 fclose(fp);
                 return false;
@@ -170,7 +206,7 @@ bool load_dds(const char *filepath, Image *out_image)
         return false;
     }
 
-    const size_t block_bytes = out_image->format == Format::BC1 ? 8 : 16;
+    const size_t block_bytes = block_size(out_image->format);
     uint32_t curr_w = out_image->width;
     uint32_t curr_h = out_image->height;
     size_t total_bytes = 0;
@@ -215,6 +251,21 @@ bool save_dds(const char *filepath, const Image *image)
     if (!image || !image->data)
         return false;
 
+    uint32_t dxgi_format;
+    switch (image->format)
+    {
+    case Format::BC1: dxgi_format = image->is_srgb ? 72 : 71; break;
+    case Format::BC2: dxgi_format = image->is_srgb ? 75 : 74; break;
+    case Format::BC3: dxgi_format = image->is_srgb ? 78 : 77; break;
+    case Format::BC4_UNORM: dxgi_format = 80; break;
+    case Format::BC4_SNORM: dxgi_format = 81; break;
+    case Format::BC5_UNORM: dxgi_format = 83; break;
+    case Format::BC5_SNORM: dxgi_format = 84; break;
+    case Format::BC6H_UF16: dxgi_format = 95; break;
+    case Format::BC7: dxgi_format = image->is_srgb ? 99 : 98; break;
+    default: return false;
+    }
+
     FILE *fp = fopen(filepath, "wb");
     if (!fp)
         return false;
@@ -243,14 +294,7 @@ bool save_dds(const char *filepath, const Image *image)
     dxt10.resource_dimension = 3; // TEXTURE2D
     dxt10.array_size = 1;
 
-    if (image->format == Format::Unknown)
-    {
-        fclose(fp);
-        return false;
-    }
-    dxt10.dxgi_format = image->format == Format::BC6H_UF16
-                            ? 95
-                            : (image->format == Format::BC7 ? (image->is_srgb ? 99 : 98) : (image->is_srgb ? 72 : 71));
+    dxt10.dxgi_format = dxgi_format;
 
     fwrite(&dxt10, sizeof(dxt10), 1, fp);
 

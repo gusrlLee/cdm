@@ -18,7 +18,7 @@ static bool prepare_mip_chain(Image &image)
 {
     uint32_t width = image.width;
     uint32_t height = image.height;
-    const size_t block_bytes = image.format == Format::BC1 ? 8 : 16;
+    const size_t block_bytes = block_size(image.format);
     MipLevel levels[MAX_MIP_LEVELS];
     size_t total_bytes = 0;
     uint32_t count = 0;

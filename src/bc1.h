@@ -179,12 +179,13 @@ CDM_INLINE void get_palette_impl(uint16_t c0, uint16_t c1, Float3 palette[4])
 }
 
 // Decode a BC1 block's 4-color palette into linear (or sRGB-decoded) float RGB.
+template <bool Opaque = false>
 CDM_INLINE void get_palette_scalar(uint16_t c0, uint16_t c1, bool is_srgb, Float3 palette[4])
 {
     if (is_srgb)
-        get_palette_impl<true>(c0, c1, palette);
+        get_palette_impl<true, Opaque>(c0, c1, palette);
     else
-        get_palette_impl<false>(c0, c1, palette);
+        get_palette_impl<false, Opaque>(c0, c1, palette);
 }
 
 // ---------------------------------------------------------------------
@@ -193,11 +194,12 @@ CDM_INLINE void get_palette_scalar(uint16_t c0, uint16_t c1, bool is_srgb, Float
 
 // Quadrant means with boundary clamping to prevent padding pixel contamination
 // Scalar decode path
+template <bool Opaque = false>
 CDM_INLINE void get_quadrant_means_scalar(const Block64 &block, bool is_srgb, Float3 out_quadrants[4],
                                           uint32_t valid_w = 4, uint32_t valid_h = 4)
 {
     Float3 pal[4];
-    get_palette_scalar(block.c0, block.c1, is_srgb, pal);
+    get_palette_scalar<Opaque>(block.c0, block.c1, is_srgb, pal);
 
     if (valid_w == 4 && valid_h == 4)
     {
@@ -413,11 +415,12 @@ __device__ __forceinline__ Float3 device_palette_color(uint16_t c0, uint16_t c1,
     return {decode_channel<Srgb>(color.r), decode_channel<Srgb>(color.g), decode_channel<Srgb>(color.b)};
 }
 
-template <bool Srgb> __device__ __forceinline__ Float3 device_quadrant_mean(const Block64 &block, uint32_t quadrant)
+template <bool Srgb, bool Opaque = false>
+__device__ __forceinline__ Float3 device_quadrant_mean(const Block64 &block, uint32_t quadrant)
 {
     const unsigned mask = half_warp_mask();
     const uint32_t group_start = (threadIdx.x & 15u) & ~3u;
-    const Float3 owned = device_palette_color<Srgb>(block.c0, block.c1, quadrant);
+    const Float3 owned = device_palette_color<Srgb, Opaque>(block.c0, block.c1, quadrant);
     const uint32_t counts = selector_region_counts(block.indices, quadrant);
     const uint32_t shift = ((quadrant & 1u) << 2) | ((quadrant >> 1) << 4);
     Float3 result{};

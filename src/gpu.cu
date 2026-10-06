@@ -1,4 +1,8 @@
 #include "bc1.h"
+#include "bc2.h"
+#include "bc3.h"
+#include "bc4.h"
+#include "bc5.h"
 #include "bc6h.h"
 #include "bc7.h"
 #include "mip.h"
@@ -12,7 +16,6 @@
 
 using Color = Float3;
 using MeanImage = MeanImage3;
-using Color4 = Float4;
 static_assert(sizeof(Block64) == 8);
 
 static_assert(texel_index(0) == 0 && texel_index(3) == 5 && texel_index(10) == 12 && texel_index(15) == 15);
@@ -208,10 +211,43 @@ static __global__ void generate_bc6h_mean_mip(MeanImage source, bc6h::Block *des
     bc6h::encode_half_warp(sample, lane, destination + output_index);
 }
 
-template <bool Srgb>
-static __global__ void generate_bc7_base(const bc7::Block *source, uint32_t source_width, uint32_t source_height,
-                                         bc7::Block *destination, uint32_t destination_width,
-                                         uint32_t destination_height, bc7::MeanImage means, uint32_t valid_width,
+struct Bc7CudaCodec
+{
+    using Block = bc7::Block;
+    using Color = Float4;
+    using MeanImage = MeanImage4;
+    template <bool Srgb> static __device__ Color device_quadrant_mean(const Block &b, uint32_t q)
+    {
+        return bc7::device_quadrant_mean<Srgb>(b, q);
+    }
+    template <bool Srgb> static __device__ void encode_half_warp(Color s, uint32_t lane, Block *out)
+    {
+        bc7::encode_half_warp<Srgb>(s, lane, out);
+    }
+};
+
+__device__ __forceinline__ Float3 quadrant_sum(Float3 s, unsigned mask)
+{
+    return {sum4(s.r, mask) * .25f, sum4(s.g, mask) * .25f, sum4(s.b, mask) * .25f};
+}
+__device__ __forceinline__ Float4 quadrant_sum(Float4 s, unsigned mask)
+{
+    return {sum4(s.r, mask) * .25f, sum4(s.g, mask) * .25f, sum4(s.b, mask) * .25f, sum4(s.a, mask) * .25f};
+}
+__device__ __forceinline__ Float3 shuffle_sample(Float3 s, uint32_t lane, unsigned mask)
+{
+    return {__shfl_sync(mask, s.r, lane, 16), __shfl_sync(mask, s.g, lane, 16), __shfl_sync(mask, s.b, lane, 16)};
+}
+__device__ __forceinline__ Float4 shuffle_sample(Float4 s, uint32_t lane, unsigned mask)
+{
+    return {__shfl_sync(mask, s.r, lane, 16), __shfl_sync(mask, s.g, lane, 16),
+            __shfl_sync(mask, s.b, lane, 16), __shfl_sync(mask, s.a, lane, 16)};
+}
+
+template <bool Srgb, typename Codec>
+static __global__ void generate_channel_base(const typename Codec::Block *source, uint32_t source_width, uint32_t source_height,
+                                         typename Codec::Block *destination, uint32_t destination_width,
+                                         uint32_t destination_height, typename Codec::MeanImage means, uint32_t valid_width,
                                          uint32_t valid_height)
 {
     uint32_t output_index = blockIdx.x * (blockDim.x >> 4) + (threadIdx.x >> 4), lane = threadIdx.x & 15u;
@@ -226,31 +262,25 @@ static __global__ void generate_bc7_base(const bc7::Block *source, uint32_t sour
     uint32_t x0 = clamp_index(ox * 2, source_width), x1 = clamp_index(x0 + 1, source_width),
              y0 = clamp_index(oy * 2, source_height), y1 = clamp_index(y0 + 1, source_height);
     uint32_t sx = (parent & 1) ? x1 : x0, sy = (parent & 2) ? y1 : y0;
-    Color4 sample = bc7::device_quadrant_mean<Srgb>(source[sy * source_width + sx], quadrant);
-    Color4 pm = {sum4(sample.r, mask) * .25f, sum4(sample.g, mask) * .25f, sum4(sample.b, mask) * .25f,
-                 sum4(sample.a, mask) * .25f};
+    typename Codec::Color sample = Codec::template device_quadrant_mean<Srgb>(source[sy * source_width + sx], quadrant);
+    const auto pm = quadrant_sum(sample, mask);
     bool unique =
         parent == 0 || (parent == 1 && x1 != x0) || (parent == 2 && y1 != y0) || (parent == 3 && x1 != x0 && y1 != y0);
     if (quadrant == 0 && unique)
     {
-        size_t i = size_t(sy) * means.width + sx;
-        means.r[i] = pm.r;
-        means.g[i] = pm.g;
-        means.b[i] = pm.b;
-        means.a[i] = pm.a;
+        means.set(sx, sy, pm);
     }
     if (valid_width < 4 || valid_height < 4)
     {
         uint32_t l = repeat_small_sample(lane, valid_width, valid_height);
-        sample = {__shfl_sync(mask, sample.r, l, 16), __shfl_sync(mask, sample.g, l, 16),
-                  __shfl_sync(mask, sample.b, l, 16), __shfl_sync(mask, sample.a, l, 16)};
+        sample = shuffle_sample(sample, l, mask);
     }
-    bc7::encode_half_warp<Srgb>(sample, lane, destination + output_index);
+    Codec::template encode_half_warp<Srgb>(sample, lane, destination + output_index);
 }
 
-template <bool Srgb>
-static __global__ void generate_bc7_mean(bc7::MeanImage source, bc7::Block *destination, uint32_t destination_width,
-                                         uint32_t destination_height, bc7::MeanImage next, uint32_t valid_width,
+template <bool Srgb, typename Codec>
+static __global__ void generate_channel_mean(typename Codec::MeanImage source, typename Codec::Block *destination, uint32_t destination_width,
+                                         uint32_t destination_height, typename Codec::MeanImage next, uint32_t valid_width,
                                          uint32_t valid_height)
 {
     uint32_t oi = blockIdx.x * (blockDim.x >> 4) + (threadIdx.x >> 4), lane = threadIdx.x & 15u;
@@ -262,30 +292,23 @@ static __global__ void generate_bc7_mean(bc7::MeanImage source, bc7::Block *dest
     oy = __shfl_sync(mask, oy, 0, 16);
     uint32_t t = texel_index(lane);
     uint32_t x = clamp_index(ox * 4 + (t & 3), source.width), y = clamp_index(oy * 4 + (t >> 2), source.height);
-    size_t i = size_t(y) * source.width + x;
-    Color4 sample = {source.r[i], source.g[i], source.b[i], source.a[i]};
-    Color4 pm = {sum4(sample.r, mask) * .25f, sum4(sample.g, mask) * .25f, sum4(sample.b, mask) * .25f,
-                 sum4(sample.a, mask) * .25f};
-    if (next.r && (lane & 3) == 0)
+    typename Codec::Color sample = source.get(x, y);
+    const auto pm = quadrant_sum(sample, mask);
+    if (next.channel(0) && (lane & 3) == 0)
     {
         uint32_t q = lane >> 2, nx = ox * 2 + (q & 1), ny = oy * 2 + (q >> 1);
         if (nx < next.width && ny < next.height)
         {
-            size_t n = size_t(ny) * next.width + nx;
-            next.r[n] = pm.r;
-            next.g[n] = pm.g;
-            next.b[n] = pm.b;
-            next.a[n] = pm.a;
+            next.set(nx, ny, pm);
         }
     }
     if (valid_width < 4 || valid_height < 4)
     {
         x = clamp_index(repeat_small_coordinate(ox * 4 + (t & 3), valid_width), source.width);
         y = clamp_index(repeat_small_coordinate(oy * 4 + (t >> 2), valid_height), source.height);
-        i = size_t(y) * source.width + x;
-        sample = {source.r[i], source.g[i], source.b[i], source.a[i]};
+        sample = source.get(x, y);
     }
-    bc7::encode_half_warp<Srgb>(sample, lane, destination + oi);
+    Codec::template encode_half_warp<Srgb>(sample, lane, destination + oi);
 }
 
 // ---------------------------------------------------------------------
@@ -373,7 +396,9 @@ struct CudaWorkspace
         const size_t base_count = (size_t)image->mips[0].block_count_x * image->mips[0].block_count_y;
         const size_t scratch_count =
             (size_t)((image->mips[0].block_count_x + 1) / 2) * ((image->mips[0].block_count_y + 1) / 2);
-        const size_t channels = image->format == Format::BC7 ? 4 : 3;
+        const size_t channels = image->format == Format::BC4_UNORM || image->format == Format::BC4_SNORM ? 1 :
+                                image->format == Format::BC5_UNORM || image->format == Format::BC5_SNORM ? 2 :
+                                image->format == Format::BC2 || image->format == Format::BC3 || image->format == Format::BC7 ? 4 : 3;
         return data.allocate(image->data_size) && base.allocate(base_count * channels) &&
                scratch.allocate(scratch_count * channels);
     }
@@ -469,33 +494,33 @@ static bool generate_bc6h_cuda_impl(Image *image, uint8_t *device_data, MeanImag
     return true;
 }
 
-template <bool Srgb>
-static bool generate_bc7_cuda_impl(Image *image, uint8_t *device_data, bc7::MeanImage means, bc7::MeanImage scratch)
+template <bool Srgb, typename Codec>
+static bool generate_channel_cuda_impl(Image *image, uint8_t *device_data, typename Codec::MeanImage means, typename Codec::MeanImage scratch)
 {
     constexpr uint32_t threads = 256, outputs_per_block = threads / 16;
     for (uint32_t level = 1; level < image->mip_count; ++level)
     {
         const MipLevel &previous = image->mips[level - 1], &current = image->mips[level];
-        auto *destination = reinterpret_cast<bc7::Block *>(device_data + current.byte_offset);
+        auto *destination = reinterpret_cast<typename Codec::Block *>(device_data + current.byte_offset);
         uint32_t count = current.block_count_x * current.block_count_y,
                  blocks = (count + outputs_per_block - 1) / outputs_per_block;
         if (level == 1)
         {
-            const auto *source = reinterpret_cast<const bc7::Block *>(device_data + previous.byte_offset);
-            generate_bc7_base<Srgb><<<blocks, threads>>>(source, previous.block_count_x, previous.block_count_y,
+            const auto *source = reinterpret_cast<const typename Codec::Block *>(device_data + previous.byte_offset);
+            generate_channel_base<Srgb, Codec><<<blocks, threads>>>(source, previous.block_count_x, previous.block_count_y,
                                                          destination, current.block_count_x, current.block_count_y,
                                                          means, current.width, current.height);
         }
         else
         {
-            bc7::MeanImage next = {};
+            typename Codec::MeanImage next = {};
             if (level + 1 < image->mip_count)
             {
                 scratch.width = (means.width + 1) / 2;
                 scratch.height = (means.height + 1) / 2;
                 next = scratch;
             }
-            generate_bc7_mean<Srgb><<<blocks, threads>>>(means, destination, current.block_count_x,
+            generate_channel_mean<Srgb, Codec><<<blocks, threads>>>(means, destination, current.block_count_x,
                                                          current.block_count_y, next, current.width, current.height);
             if (level + 1 < image->mip_count)
                 std::swap(means, scratch);
@@ -509,6 +534,33 @@ static bool generate_bc7_cuda_impl(Image *image, uint8_t *device_data, bc7::Mean
 // ---------------------------------------------------------------------
 // Public GPU entry point
 // ---------------------------------------------------------------------
+
+template <typename Mean> static Mean device_mean_view(float *storage, size_t capacity, uint32_t w, uint32_t h)
+{
+    if constexpr (Mean::channel_count == 3)
+        return {storage, storage + capacity, storage + capacity * 2, w, h};
+    else if constexpr (Mean::channel_count == 4)
+        return {storage, storage + capacity, storage + capacity * 2, storage + capacity * 3, w, h};
+    else
+    {
+        Mean result{};
+        for (uint32_t c = 0; c < Mean::channel_count; ++c) result.planes[c] = storage + capacity * c;
+        result.width = w;
+        result.height = h;
+        return result;
+    }
+}
+
+template <typename Codec> static bool dispatch_channel_cuda(Image *image)
+{
+    const uint32_t w = image->mips[0].block_count_x, h = image->mips[0].block_count_y;
+    const uint32_t sw = (w + 1) / 2, sh = (h + 1) / 2;
+    using Mean = typename Codec::MeanImage;
+    const Mean means = device_mean_view<Mean>(g_workspace.base.get(), size_t(w) * h, w, h);
+    const Mean scratch = device_mean_view<Mean>(g_workspace.scratch.get(), size_t(sw) * sh, sw, sh);
+    return image->is_srgb ? generate_channel_cuda_impl<true, Codec>(image, g_workspace.data.get(), means, scratch)
+                          : generate_channel_cuda_impl<false, Codec>(image, g_workspace.data.get(), means, scratch);
+}
 
 bool prepare_mipmaps_cuda(const Image *image)
 {
@@ -536,31 +588,29 @@ bool generate_mipmaps_cuda(Image *image)
         cudaSuccess)
         return false;
 
-    MeanImage means = {g_workspace.base.get(), g_workspace.base.get() + base_count,
-                       g_workspace.base.get() + base_count * 2, base_width, base_height};
-    MeanImage scratch = {g_workspace.scratch.get(), g_workspace.scratch.get() + scratch_count,
-                         g_workspace.scratch.get() + scratch_count * 2, scratch_width, scratch_height};
-
-    bc7::MeanImage means4 = {g_workspace.base.get(),
-                             g_workspace.base.get() + base_count,
-                             g_workspace.base.get() + base_count * 2,
-                             g_workspace.base.get() + base_count * 3,
-                             base_width,
-                             base_height};
-    bc7::MeanImage scratch4 = {g_workspace.scratch.get(),
-                               g_workspace.scratch.get() + scratch_count,
-                               g_workspace.scratch.get() + scratch_count * 2,
-                               g_workspace.scratch.get() + scratch_count * 3,
-                               scratch_width,
-                               scratch_height};
-    bool generated =
-        image->format == Format::BC6H_UF16
-            ? generate_bc6h_cuda_impl(image, g_workspace.data.get(), means, scratch)
-            : (image->format == Format::BC7
-                   ? (image->is_srgb ? generate_bc7_cuda_impl<true>(image, g_workspace.data.get(), means4, scratch4)
-                                     : generate_bc7_cuda_impl<false>(image, g_workspace.data.get(), means4, scratch4))
-                   : (image->is_srgb ? generate_cuda_impl<true>(image, g_workspace.data.get(), means, scratch)
-                                     : generate_cuda_impl<false>(image, g_workspace.data.get(), means, scratch)));
+    bool generated = false;
+    switch (image->format)
+    {
+    case Format::BC1:
+    case Format::BC6H_UF16:
+    {
+        MeanImage means = device_mean_view<MeanImage>(g_workspace.base.get(), base_count, base_width, base_height);
+        MeanImage scratch = device_mean_view<MeanImage>(g_workspace.scratch.get(), scratch_count, scratch_width, scratch_height);
+        generated = image->format == Format::BC6H_UF16
+                        ? generate_bc6h_cuda_impl(image, g_workspace.data.get(), means, scratch)
+                        : (image->is_srgb ? generate_cuda_impl<true>(image, g_workspace.data.get(), means, scratch)
+                                          : generate_cuda_impl<false>(image, g_workspace.data.get(), means, scratch));
+        break;
+    }
+    case Format::BC2: generated = dispatch_channel_cuda<bc2::Codec>(image); break;
+    case Format::BC3: generated = dispatch_channel_cuda<bc3::Codec>(image); break;
+    case Format::BC4_UNORM: generated = dispatch_channel_cuda<bc4::Codec<false>>(image); break;
+    case Format::BC4_SNORM: generated = dispatch_channel_cuda<bc4::Codec<true>>(image); break;
+    case Format::BC5_UNORM: generated = dispatch_channel_cuda<bc5::Codec<false>>(image); break;
+    case Format::BC5_SNORM: generated = dispatch_channel_cuda<bc5::Codec<true>>(image); break;
+    case Format::BC7: generated = dispatch_channel_cuda<Bc7CudaCodec>(image); break;
+    default: return false;
+    }
     const size_t generated_offset = image->mips[1].byte_offset;
     return generated && cudaMemcpy(image->data + generated_offset, g_workspace.data.get() + generated_offset,
                                    image->data_size - generated_offset, cudaMemcpyDeviceToHost) == cudaSuccess;

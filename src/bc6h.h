@@ -884,7 +884,8 @@ CDM_INLINE void decode_block(const bc6h::Block &block, Float3 pixels[16])
 CDM_INLINE float sanitize_hdr(float value);
 CDM_INLINE Float3 sanitize_hdr(const Float3 &value);
 
-CDM_INLINE void get_quadrant_means(const bc6h::Block &block, Float3 out[4])
+CDM_INLINE void get_quadrant_means(const bc6h::Block &block, Float3 out[4],
+                                   uint32_t valid_width = 4, uint32_t valid_height = 4)
 {
     const SymbolicBC6H symbolic = parse_symbolic_block(block);
     for (uint32_t quadrant = 0; quadrant < 4; ++quadrant)
@@ -901,7 +902,8 @@ CDM_INLINE void get_quadrant_means(const bc6h::Block &block, Float3 out[4])
     for (uint32_t texel = 0; texel < 16; ++texel)
     {
         const uint32_t quadrant = ((texel & 3u) >> 1) | (((texel >> 2) >> 1) << 1);
-        const uint8_t key = uint8_t(symbolic.subset[texel] | (symbolic.selector[texel] << 1));
+        const uint32_t source_texel = valid_texel_index(texel, valid_width, valid_height);
+        const uint8_t key = uint8_t(symbolic.subset[source_texel] | (symbolic.selector[source_texel] << 1));
         uint32_t entry = 0;
         while (entry < entry_count && histogram[entry].key != key)
             ++entry;
@@ -1075,17 +1077,23 @@ CDM_INLINE bc6h::Block encode_samples_scalar(const Float3 samples[16])
 
 CDM_INLINE bc6h::Block generate_child_block_scalar(const bc6h::Block &p00, const bc6h::Block &p10,
                                                    const bc6h::Block &p01, const bc6h::Block &p11,
-                                                   Float3 parent_means[4], uint32_t valid_width, uint32_t valid_height)
+                                                   Float3 parent_means[4], uint32_t valid_width, uint32_t valid_height,
+                                                   uint32_t source_width, uint32_t source_height)
 {
     Float3 samples[16];
-    get_quadrant_means(p00, samples);
-    get_quadrant_means(p10, samples + 4);
-    get_quadrant_means(p01, samples + 8);
-    get_quadrant_means(p11, samples + 12);
+    get_quadrant_means(p00, samples, parent_valid_extent(source_width, 0),
+                       parent_valid_extent(source_height, 0));
+    get_quadrant_means(p10, samples + 4, parent_valid_extent(source_width, 1),
+                       parent_valid_extent(source_height, 0));
+    get_quadrant_means(p01, samples + 8, parent_valid_extent(source_width, 0),
+                       parent_valid_extent(source_height, 1));
+    get_quadrant_means(p11, samples + 12, parent_valid_extent(source_width, 1),
+                       parent_valid_extent(source_height, 1));
+    // Stored means must use valid child samples, before encoder fitting.
+    repeat_small_samples(samples, valid_width, valid_height);
     for (int parent = 0; parent < 4; ++parent)
         parent_means[parent] =
             (samples[parent * 4] + samples[parent * 4 + 1] + samples[parent * 4 + 2] + samples[parent * 4 + 3]) * 0.25f;
-    repeat_small_samples(samples, valid_width, valid_height);
     return encode_samples_scalar(samples);
 }
 
@@ -1097,8 +1105,8 @@ CDM_INLINE bc6h::Block generate_child_block_from_means_scalar(const MeanImage &s
     for (uint32_t i = 0; i < 16; ++i)
     {
         uint32_t local = texel_map[i];
-        samples[i] = source.get(repeat_small_coordinate(block_x * 4 + (local & 3u), valid_width),
-                                repeat_small_coordinate(block_y * 4 + (local >> 2), valid_height));
+        samples[i] = source.get(block_x * 4 + repeat_small_coordinate(local & 3u, valid_width),
+                                block_y * 4 + repeat_small_coordinate(local >> 2, valid_height));
     }
     return encode_samples_scalar(samples);
 }
@@ -1236,8 +1244,8 @@ CDM_INLINE void generate_child_blocks_from_means_x4(const MeanImage &source, uin
         {
             uint32_t x = block_x + (lane < lanes ? lane : lanes - 1);
             uint32_t local = texel_map[i];
-            scalar[lane][i] = source.get(repeat_small_coordinate(x * 4 + (local & 3u), valid_width),
-                                         repeat_small_coordinate(block_y * 4 + (local >> 2), valid_height));
+            scalar[lane][i] = source.get(x * 4 + repeat_small_coordinate(local & 3u, valid_width),
+                                         block_y * 4 + repeat_small_coordinate(local >> 2, valid_height));
         }
     Float3x4 packed[16];
     for (int i = 0; i < 16; ++i)
@@ -1252,7 +1260,8 @@ CDM_INLINE void generate_child_blocks_from_means_x4(const MeanImage &source, uin
 #endif
 
 #if defined(__CUDACC__)
-__device__ __forceinline__ Float3 device_quadrant_mean(const Block &block, uint32_t quadrant)
+__device__ __forceinline__ Float3 device_quadrant_mean(const Block &block, uint32_t quadrant,
+                                                       uint32_t valid_width = 4, uint32_t valid_height = 4)
 {
     const SymbolicBC6H symbolic = parse_symbolic_block(block);
     if (!symbolic.valid)
@@ -1264,7 +1273,7 @@ __device__ __forceinline__ Float3 device_quadrant_mean(const Block &block, uint3
     for (uint32_t dy = 0; dy < 2; ++dy)
         for (uint32_t dx = 0; dx < 2; ++dx)
         {
-            const uint32_t texel = (y0 + dy) * 4 + x0 + dx;
+            const uint32_t texel = valid_texel_index((y0 + dy) * 4 + x0 + dx, valid_width, valid_height);
             const uint8_t key = uint8_t(symbolic.subset[texel] | (symbolic.selector[texel] << 1));
             uint32_t entry = 0;
             while (entry < entries && keys[entry] != key)

@@ -11,13 +11,18 @@ static_assert(offsetof(Block, rgb) == 8);
 using Color = Float4;
 using MeanImage = MeanImage4;
 
-CDM_INLINE float alpha_quadrant_mean(uint64_t alpha, uint32_t q)
+CDM_INLINE float alpha_quadrant_mean(uint64_t alpha, uint32_t q,
+                                     uint32_t valid_width = 4, uint32_t valid_height = 4)
 {
     const uint32_t t = (q & 1u) * 2 + (q >> 1) * 8;
-    const uint32_t sum = uint32_t((alpha >> (4 * t)) & 15u) +
-                         uint32_t((alpha >> (4 * (t + 1))) & 15u) +
-                         uint32_t((alpha >> (4 * (t + 4))) & 15u) +
-                         uint32_t((alpha >> (4 * (t + 5))) & 15u);
+    const uint32_t t00 = valid_texel_index(t, valid_width, valid_height);
+    const uint32_t t10 = valid_texel_index(t + 1, valid_width, valid_height);
+    const uint32_t t01 = valid_texel_index(t + 4, valid_width, valid_height);
+    const uint32_t t11 = valid_texel_index(t + 5, valid_width, valid_height);
+    const uint32_t sum = uint32_t((alpha >> (4 * t00)) & 15u) +
+                         uint32_t((alpha >> (4 * t10)) & 15u) +
+                         uint32_t((alpha >> (4 * t01)) & 15u) +
+                         uint32_t((alpha >> (4 * t11)) & 15u);
     return float(sum) * (1.0f / 60.0f);
 }
 
@@ -60,12 +65,13 @@ struct Codec
     using Color = bc2::Color;
     using MeanImage = bc2::MeanImage;
 #if !defined(__CUDACC__)
-    static void quadrant_means(const Block &block, bool srgb, Color out[4])
+    static void quadrant_means(const Block &block, bool srgb, Color out[4],
+                               uint32_t valid_width = 4, uint32_t valid_height = 4)
     {
         Float3 rgb[4];
-        bc1::get_quadrant_means_scalar<true>(block.rgb, srgb, rgb);
+        bc1::get_quadrant_means_scalar<true>(block.rgb, srgb, rgb, valid_width, valid_height);
         for (uint32_t q = 0; q < 4; ++q)
-            out[q] = {rgb[q].r, rgb[q].g, rgb[q].b, alpha_quadrant_mean(block.alpha, q)};
+            out[q] = {rgb[q].r, rgb[q].g, rgb[q].b, alpha_quadrant_mean(block.alpha, q, valid_width, valid_height)};
     }
     static Block encode_samples(const Color samples[16], bool srgb)
     {
@@ -78,10 +84,11 @@ struct Codec
         for (uint32_t lane = 0; lane < 4; ++lane) out[lane] = {encode_alpha(samples[lane]), rgb[lane]};
     }
 #else
-    template <bool Srgb> static __device__ Color device_quadrant_mean(const Block &block, uint32_t q)
+    template <bool Srgb> static __device__ Color device_quadrant_mean(const Block &block, uint32_t q,
+                                                                      uint32_t valid_width = 4, uint32_t valid_height = 4)
     {
-        const Float3 rgb = bc1::device_quadrant_mean<Srgb, true>(block.rgb, q);
-        return {rgb.r, rgb.g, rgb.b, alpha_quadrant_mean(block.alpha, q)};
+        const Float3 rgb = bc1::device_quadrant_mean<Srgb, true>(block.rgb, q, valid_width, valid_height);
+        return {rgb.r, rgb.g, rgb.b, alpha_quadrant_mean(block.alpha, q, valid_width, valid_height)};
     }
     template <bool Srgb> static __device__ void encode_half_warp(Color sample, uint32_t lane, Block *out)
     {

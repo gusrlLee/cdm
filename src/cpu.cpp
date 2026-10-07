@@ -194,9 +194,9 @@ struct Bc1Codec
     using Color = Float3;
     using MeanImage = MeanImage3;
     static Block child(const Block &a, const Block &b, const Block &c, const Block &d, bool srgb, Color means[4],
-                       uint32_t w, uint32_t h)
+                       uint32_t w, uint32_t h, uint32_t source_width, uint32_t source_height)
     {
-        return bc1::generate_child_block_scalar(a, b, c, d, srgb, means, w, h);
+        return bc1::generate_child_block_scalar(a, b, c, d, srgb, means, w, h, source_width, source_height);
     }
     static Block from_means(const MeanImage &m, uint32_t x, uint32_t y, bool srgb, uint32_t w, uint32_t h)
     {
@@ -220,9 +220,9 @@ struct Bc6hCodec
     using Color = Float3;
     using MeanImage = MeanImage3;
     static Block child(const Block &a, const Block &b, const Block &c, const Block &d, bool, Color means[4], uint32_t w,
-                       uint32_t h)
+                       uint32_t h, uint32_t source_width, uint32_t source_height)
     {
-        return bc6h::generate_child_block_scalar(a, b, c, d, means, w, h);
+        return bc6h::generate_child_block_scalar(a, b, c, d, means, w, h, source_width, source_height);
     }
     static Block from_means(const MeanImage &m, uint32_t x, uint32_t y, bool, uint32_t w, uint32_t h)
     {
@@ -246,9 +246,9 @@ struct Bc7Codec
     using Color = Float4;
     using MeanImage = MeanImage4;
     static Block child(const Block &a, const Block &b, const Block &c, const Block &d, bool srgb, Color means[4],
-                       uint32_t w, uint32_t h)
+                       uint32_t w, uint32_t h, uint32_t source_width, uint32_t source_height)
     {
-        return bc7::generate_child(a, b, c, d, srgb, means, w, h);
+        return bc7::generate_child(a, b, c, d, srgb, means, w, h, source_width, source_height);
     }
     static Block from_means(const MeanImage &m, uint32_t x, uint32_t y, bool srgb, uint32_t w, uint32_t h)
     {
@@ -274,21 +274,27 @@ template <typename Operations> struct ChannelCodec
     using MeanImage = typename Operations::MeanImage;
 
     static void child_samples(const Block &a, const Block &b, const Block &c, const Block &d, bool srgb,
-                              Color samples[16], Color means[4], uint32_t w, uint32_t h)
+                              Color samples[16], Color means[4], uint32_t w, uint32_t h,
+                              uint32_t source_width = 8, uint32_t source_height = 8)
     {
-        Operations::quadrant_means(a, srgb, samples);
-        Operations::quadrant_means(b, srgb, samples + 4);
-        Operations::quadrant_means(c, srgb, samples + 8);
-        Operations::quadrant_means(d, srgb, samples + 12);
+        Operations::quadrant_means(a, srgb, samples, parent_valid_extent(source_width, 0),
+                                   parent_valid_extent(source_height, 0));
+        Operations::quadrant_means(b, srgb, samples + 4, parent_valid_extent(source_width, 1),
+                                   parent_valid_extent(source_height, 0));
+        Operations::quadrant_means(c, srgb, samples + 8, parent_valid_extent(source_width, 0),
+                                   parent_valid_extent(source_height, 1));
+        Operations::quadrant_means(d, srgb, samples + 12, parent_valid_extent(source_width, 1),
+                                   parent_valid_extent(source_height, 1));
+        // Padding must not enter the stored mean pyramid.
+        repeat_small_samples(samples, w, h);
         for (uint32_t p = 0; p < 4; ++p)
             means[p] = (samples[p * 4] + samples[p * 4 + 1] + samples[p * 4 + 2] + samples[p * 4 + 3]) * 0.25f;
-        repeat_small_samples(samples, w, h);
     }
     static Block child(const Block &a, const Block &b, const Block &c, const Block &d, bool srgb, Color means[4],
-                       uint32_t w, uint32_t h)
+                       uint32_t w, uint32_t h, uint32_t source_width, uint32_t source_height)
     {
         Color samples[16];
-        child_samples(a, b, c, d, srgb, samples, means, w, h);
+        child_samples(a, b, c, d, srgb, samples, means, w, h, source_width, source_height);
         return Operations::encode_samples(samples, srgb);
     }
     static void mean_samples(const MeanImage &m, uint32_t x, uint32_t y, Color samples[16], uint32_t w, uint32_t h)
@@ -296,8 +302,8 @@ template <typename Operations> struct ChannelCodec
         for (uint32_t i = 0; i < 16; ++i)
         {
             const uint32_t t = texel_index(i);
-            samples[i] = m.get(repeat_small_coordinate(x * 4 + (t & 3u), w),
-                               repeat_small_coordinate(y * 4 + (t >> 2), h));
+            samples[i] = m.get(x * 4 + repeat_small_coordinate(t & 3u, w),
+                               y * 4 + repeat_small_coordinate(t >> 2, h));
         }
     }
     static Block from_means(const MeanImage &m, uint32_t x, uint32_t y, bool srgb, uint32_t w, uint32_t h)
@@ -343,16 +349,25 @@ void process_rows(const Image *image, const MipLevel &previous, const MipLevel &
     
     for (uint32_t by = begin; by < end; ++by)
     {
+        const uint32_t local_height = block_valid_extent(current.height, by);
         Block *output = destination + size_t(by) * current.block_count_x;
         if (level >= 2)
         {
+            uint32_t bx = 0;
             if constexpr (Simd)
-                for (uint32_t bx = 0; bx < current.block_count_x; bx += 4)
-                    Codec::from_means_x4(means, bx, by, std::min(4u, current.block_count_x - bx), output + bx,
-                                         image->is_srgb, current.width, current.height);
-            else
-                for (uint32_t bx = 0; bx < current.block_count_x; ++bx)
-                    output[bx] = Codec::from_means(means, bx, by, image->is_srgb, current.width, current.height);
+            {
+                // Each SIMD lane has a full-width block; only the final partial block falls back.
+                const uint32_t full_blocks = current.width / 4;
+                while (bx < full_blocks)
+                {
+                    const uint32_t lanes = std::min(4u, full_blocks - bx);
+                    Codec::from_means_x4(means, bx, by, lanes, output + bx, image->is_srgb, 4, local_height);
+                    bx += lanes;
+                }
+            }
+            for (; bx < current.block_count_x; ++bx)
+                output[bx] = Codec::from_means(means, bx, by, image->is_srgb,
+                                                block_valid_extent(current.width, bx), local_height);
             continue;
         }
 
@@ -360,16 +375,19 @@ void process_rows(const Image *image, const MipLevel &previous, const MipLevel &
         const Block *row0 = source + size_t(y0) * previous.block_count_x;
         const Block *row1 = source + size_t(y1) * previous.block_count_x;
         uint32_t bx = 0;
+        // Vector stores are safe only when all parent means belong to the active domain.
         if constexpr (Simd)
-            for (; bx + 3 < current.block_count_x && (bx + 3) * 2 + 1 < previous.block_count_x; bx += 4)
+            for (; (bx + 4) * 4 <= current.width && local_height == 4 &&
+                   bx * 2 + 7 < means.width && y1 < means.height; bx += 4)
                 Codec::children_x4(row0 + bx * 2, row1 + bx * 2, output + bx, means, bx * 2, y0, y1, image->is_srgb,
-                                   current.width, current.height);
+                                   4, 4);
         for (; bx < current.block_count_x; ++bx)
         {
             const uint32_t x0 = bx * 2, x1 = std::min(x0 + 1, previous.block_count_x - 1);
             typename Codec::Color parent_means[4];
             output[bx] = Codec::child(row0[x0], row0[x1], row1[x0], row1[x1], image->is_srgb, parent_means,
-                                      current.width, current.height);
+                                      block_valid_extent(current.width, bx), local_height,
+                                      previous.width - x0 * 4, previous.height - y0 * 4);
             means.set(x0, y0, parent_means[0]);
             means.set(x1, y0, parent_means[1]);
             means.set(x0, y1, parent_means[2]);
@@ -390,7 +408,10 @@ template <typename Codec, bool Simd> bool generate_cpu(Image *image)
     if (!base || !scratch_data)
         return false;
     
-    MeanImage means = make_mean_image<MeanImage>(base.get(), base_count, bw, bh);
+    // Capacity uses physical block counts; active rows are packed with mip2's logical stride.
+    const uint32_t mean_width = image->mip_count > 2 ? image->mips[2].width : 1;
+    const uint32_t mean_height = image->mip_count > 2 ? image->mips[2].height : 1;
+    MeanImage means = make_mean_image<MeanImage>(base.get(), base_count, mean_width, mean_height);
     MeanImage scratch = make_mean_image<MeanImage>(scratch_data.get(), scratch_count, sw, sh);
     
     for (uint32_t level = 1; level < image->mip_count; ++level)
@@ -398,8 +419,8 @@ template <typename Codec, bool Simd> bool generate_cpu(Image *image)
         const MipLevel previous = image->mips[level - 1], current = image->mips[level];
         if (level >= 3)
         {
-            scratch.width = (means.width + 1) / 2;
-            scratch.height = (means.height + 1) / 2;
+            scratch.width = current.width;
+            scratch.height = current.height;
             downsample_means<Simd>(means, scratch);
             std::swap(means, scratch);
         }

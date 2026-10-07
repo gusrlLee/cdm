@@ -379,7 +379,8 @@ template <bool Srgb> CDM_INLINE void palette(const uint8_t ep[2][4], Float4 out[
 }
 
 #if !defined(__CUDACC__)
-template <bool Srgb> CDM_INLINE void quadrant_means(const Block &block, Float4 out[4])
+template <bool Srgb> CDM_INLINE void quadrant_means(const Block &block, Float4 out[4],
+                                                    uint32_t valid_width = 4, uint32_t valid_height = 4)
 {
     const SymbolicBC7 symbolic = parse_symbolic_block(block);
     for (uint32_t q = 0; q < 4; ++q)
@@ -398,8 +399,9 @@ template <bool Srgb> CDM_INLINE void quadrant_means(const Block &block, Float4 o
     {
         const uint32_t x = texel & 3, y = texel >> 2;
         const uint32_t quadrant = (x >> 1) | ((y >> 1) << 1);
-        const uint16_t key = uint16_t(symbolic.subset[texel] | (symbolic.color_index[texel] << 2) |
-                                      (symbolic.alpha_index[texel] << 6));
+        const uint32_t source_texel = valid_texel_index(texel, valid_width, valid_height);
+        const uint16_t key = uint16_t(symbolic.subset[source_texel] | (symbolic.color_index[source_texel] << 2) |
+                                      (symbolic.alpha_index[source_texel] << 6));
         uint32_t entry = 0;
         while (entry < entry_count && histogram[entry].key != key)
             ++entry;
@@ -1098,33 +1100,36 @@ CDM_INLINE Block encode_samples(const Float4 s[16], bool srgb)
 }
 
 CDM_INLINE Block generate_child(const Block &p00, const Block &p10, const Block &p01, const Block &p11, bool srgb,
-                                Float4 parent_means[4], uint32_t valid_width, uint32_t valid_height)
+                                Float4 parent_means[4], uint32_t valid_width, uint32_t valid_height,
+                                uint32_t source_width, uint32_t source_height)
 {
     Float4 s[16];
     if (srgb)
     {
-        quadrant_means<true>(p00, s);
-        quadrant_means<true>(p10, s + 4);
-        quadrant_means<true>(p01, s + 8);
-        quadrant_means<true>(p11, s + 12);
+        quadrant_means<true>(p00, s, parent_valid_extent(source_width, 0),
+                             parent_valid_extent(source_height, 0));
+        quadrant_means<true>(p10, s + 4, parent_valid_extent(source_width, 1),
+                             parent_valid_extent(source_height, 0));
+        quadrant_means<true>(p01, s + 8, parent_valid_extent(source_width, 0),
+                             parent_valid_extent(source_height, 1));
+        quadrant_means<true>(p11, s + 12, parent_valid_extent(source_width, 1),
+                             parent_valid_extent(source_height, 1));
     }
     else
     {
-        quadrant_means<false>(p00, s);
-        quadrant_means<false>(p10, s + 4);
-        quadrant_means<false>(p01, s + 8);
-        quadrant_means<false>(p11, s + 12);
+        quadrant_means<false>(p00, s, parent_valid_extent(source_width, 0),
+                              parent_valid_extent(source_height, 0));
+        quadrant_means<false>(p10, s + 4, parent_valid_extent(source_width, 1),
+                              parent_valid_extent(source_height, 0));
+        quadrant_means<false>(p01, s + 8, parent_valid_extent(source_width, 0),
+                              parent_valid_extent(source_height, 1));
+        quadrant_means<false>(p11, s + 12, parent_valid_extent(source_width, 1),
+                              parent_valid_extent(source_height, 1));
     }
+    // Use only valid child samples when storing means for the next logical mip.
+    repeat_small_samples(s, valid_width, valid_height);
     for (int p = 0; p < 4; ++p)
         parent_means[p] = (s[p * 4] + s[p * 4 + 1] + s[p * 4 + 2] + s[p * 4 + 3]) * 0.25f;
-    if (valid_width < 4 || valid_height < 4)
-    {
-        Float4 copy[16];
-        for (int i = 0; i < 16; ++i)
-            copy[i] = s[i];
-        for (uint32_t i = 0; i < 16; ++i)
-            s[i] = copy[repeat_small_sample(i, valid_width, valid_height)];
-    }
     return encode_samples(s, srgb);
 }
 
@@ -1136,7 +1141,7 @@ CDM_INLINE Block generate_from_means(const MeanImage &source, uint32_t bx, uint3
     {
         uint32_t t = texel_index(i);
         s[i] =
-            source.get(repeat_small_coordinate(bx * 4 + (t & 3), vw), repeat_small_coordinate(by * 4 + (t >> 2), vh));
+            source.get(bx * 4 + repeat_small_coordinate(t & 3, vw), by * 4 + repeat_small_coordinate(t >> 2, vh));
     }
     return encode_samples(s, srgb);
 }
@@ -1318,8 +1323,8 @@ CDM_INLINE void generate_from_means_x4(const MeanImage &m, uint32_t bx, uint32_t
         for (uint32_t i = 0; i < 16; ++i)
         {
             uint32_t t = texel_index(i);
-            s[lane][i] = m.get(repeat_small_coordinate((bx + lane) * 4 + (t & 3), vw),
-                               repeat_small_coordinate(by * 4 + (t >> 2), vh));
+            s[lane][i] = m.get((bx + lane) * 4 + repeat_small_coordinate(t & 3, vw),
+                               by * 4 + repeat_small_coordinate(t >> 2, vh));
         }
     for (uint32_t lane = lanes; lane < 4; ++lane)
         for (int i = 0; i < 16; ++i)
@@ -1385,7 +1390,8 @@ template <bool Srgb> __device__ __forceinline__ Float4 device_color(const uint8_
     return rgba8_to_linear<Srgb>(value);
 }
 
-template <bool Srgb> __device__ __forceinline__ Float4 device_quadrant_mean(const Block &block, uint32_t quadrant)
+template <bool Srgb> __device__ __forceinline__ Float4 device_quadrant_mean(const Block &block, uint32_t quadrant,
+                                                                            uint32_t valid_width = 4, uint32_t valid_height = 4)
 {
     const SymbolicBC7 symbolic = parse_symbolic_block(block);
     if (!symbolic.valid)
@@ -1397,7 +1403,7 @@ template <bool Srgb> __device__ __forceinline__ Float4 device_quadrant_mean(cons
     for (uint32_t dy = 0; dy < 2; ++dy)
         for (uint32_t dx = 0; dx < 2; ++dx)
         {
-            const uint32_t texel = (y0 + dy) * 4 + x0 + dx;
+            const uint32_t texel = valid_texel_index((y0 + dy) * 4 + x0 + dx, valid_width, valid_height);
             const uint16_t key = uint16_t(symbolic.subset[texel] | (symbolic.color_index[texel] << 2) |
                                           (symbolic.alpha_index[texel] << 6));
             uint32_t entry = 0;

@@ -159,11 +159,12 @@ CDM_INLINE void encode_channel_x4(const v4f samples[16], Block out[4])
 
 #if defined(__CUDACC__)
 template <bool Signed, bool Integer = false>
-__device__ __forceinline__ float device_quadrant_mean(const Block &block, uint32_t q)
+__device__ __forceinline__ float device_quadrant_mean(const Block &block, uint32_t q,
+                                                      uint32_t valid_width = 4, uint32_t valid_height = 4)
 {
     float pal[8];
     palette<Signed, Integer>(block, pal);
-    return quadrant_mean(block, pal, q);
+    return quadrant_mean(block, pal, q, valid_width, valid_height);
 }
 
 template <bool Signed, bool Integer = false>
@@ -204,11 +205,12 @@ template <bool Signed> struct Codec
     using Color = Float3;
     using MeanImage = MeanImageChannels<1>;
 #if !defined(__CUDACC__)
-    static void quadrant_means(const Block &block, bool, Color out[4])
+    static void quadrant_means(const Block &block, bool, Color out[4],
+                               uint32_t valid_width = 4, uint32_t valid_height = 4)
     {
         float pal[8];
         palette<Signed>(block, pal);
-        for (uint32_t q = 0; q < 4; ++q) out[q] = {quadrant_mean(block, pal, q), 0, 0};
+        for (uint32_t q = 0; q < 4; ++q) out[q] = {quadrant_mean(block, pal, q, valid_width, valid_height), 0, 0};
     }
     static Block encode_samples(const Color samples[16], bool)
     {
@@ -224,9 +226,10 @@ template <bool Signed> struct Codec
         encode_channel_x4<Signed>(values, out);
     }
 #else
-    template <bool Srgb> static __device__ Color device_quadrant_mean(const Block &block, uint32_t q)
+    template <bool Srgb> static __device__ Color device_quadrant_mean(const Block &block, uint32_t q,
+                                                                      uint32_t valid_width = 4, uint32_t valid_height = 4)
     {
-        return {bc4::device_quadrant_mean<Signed>(block, q), 0, 0};
+        return {bc4::device_quadrant_mean<Signed>(block, q, valid_width, valid_height), 0, 0};
     }
     template <bool Srgb> static __device__ void encode_half_warp(Color sample, uint32_t lane, Block *out)
     {

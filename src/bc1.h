@@ -373,17 +373,23 @@ CDM_INLINE Block64 encode_samples_scalar(const Float3 samples[16], bool is_srgb)
 // Combine four BC1 parent blocks (2x2) into one child block, one mip level down.
 CDM_INLINE Block64 generate_child_block_scalar(const Block64 &p00, const Block64 &p10, const Block64 &p01,
                                                const Block64 &p11, bool is_srgb, Float3 parent_means[4],
-                                               uint32_t valid_width, uint32_t valid_height)
+                                               uint32_t valid_width, uint32_t valid_height,
+                                               uint32_t source_width, uint32_t source_height)
 {
     Float3 samples[16];
-    get_quadrant_means_scalar(p00, is_srgb, samples + 0);
-    get_quadrant_means_scalar(p10, is_srgb, samples + 4);
-    get_quadrant_means_scalar(p01, is_srgb, samples + 8);
-    get_quadrant_means_scalar(p11, is_srgb, samples + 12);
+    get_quadrant_means_scalar(p00, is_srgb, samples + 0, parent_valid_extent(source_width, 0),
+                              parent_valid_extent(source_height, 0));
+    get_quadrant_means_scalar(p10, is_srgb, samples + 4, parent_valid_extent(source_width, 1),
+                              parent_valid_extent(source_height, 0));
+    get_quadrant_means_scalar(p01, is_srgb, samples + 8, parent_valid_extent(source_width, 0),
+                              parent_valid_extent(source_height, 1));
+    get_quadrant_means_scalar(p11, is_srgb, samples + 12, parent_valid_extent(source_width, 1),
+                              parent_valid_extent(source_height, 1));
+    // Stored means must use valid child samples, before encoder fitting.
+    repeat_small_samples(samples, valid_width, valid_height);
     for (uint32_t parent = 0; parent < 4; ++parent)
         parent_means[parent] =
             (samples[parent * 4] + samples[parent * 4 + 1] + samples[parent * 4 + 2] + samples[parent * 4 + 3]) * 0.25f;
-    repeat_small_samples(samples, valid_width, valid_height);
     return encode_samples_scalar(samples, is_srgb);
 }
 
@@ -396,8 +402,8 @@ CDM_INLINE Block64 generate_child_block_from_means_scalar(const MeanImage &sourc
     for (uint32_t i = 0; i < 16; ++i)
     {
         uint32_t local = texel_map[i];
-        samples[i] = source.get(repeat_small_coordinate(block_x * 4 + (local & 3u), valid_width),
-                                repeat_small_coordinate(block_y * 4 + (local >> 2), valid_height));
+        samples[i] = source.get(block_x * 4 + repeat_small_coordinate(local & 3u, valid_width),
+                                block_y * 4 + repeat_small_coordinate(local >> 2, valid_height));
     }
     return encode_samples_scalar(samples, is_srgb);
 }
@@ -416,12 +422,24 @@ __device__ __forceinline__ Float3 device_palette_color(uint16_t c0, uint16_t c1,
 }
 
 template <bool Srgb, bool Opaque = false>
-__device__ __forceinline__ Float3 device_quadrant_mean(const Block64 &block, uint32_t quadrant)
+__device__ __forceinline__ Float3 device_quadrant_mean(const Block64 &block, uint32_t quadrant,
+                                                       uint32_t valid_width = 4, uint32_t valid_height = 4)
 {
     const unsigned mask = half_warp_mask();
     const uint32_t group_start = (threadIdx.x & 15u) & ~3u;
     const Float3 owned = device_palette_color<Srgb, Opaque>(block.c0, block.c1, quadrant);
-    const uint32_t counts = selector_region_counts(block.indices, quadrant);
+    uint32_t indices = block.indices;
+    if (valid_width < 4 || valid_height < 4)
+    {
+        // Remap selectors before counting; palette reconstruction stays unchanged.
+        indices = 0;
+        for (uint32_t texel = 0; texel < 16; ++texel)
+        {
+            const uint32_t source_texel = valid_texel_index(texel, valid_width, valid_height);
+            indices |= ((block.indices >> (source_texel * 2)) & 3u) << (texel * 2);
+        }
+    }
+    const uint32_t counts = selector_region_counts(indices, quadrant);
     const uint32_t shift = ((quadrant & 1u) << 2) | ((quadrant >> 1) << 4);
     Float3 result{};
     for (uint32_t selector = 0; selector < 4; ++selector)
@@ -909,8 +927,8 @@ CDM_INLINE void generate_child_blocks_from_means_x4(const MeanImage &source, uin
             for (uint32_t j = 0; j < 4; ++j)
             {
                 uint32_t lane_x = block_x + std::min(j, valid_lanes - 1);
-                lane[j] = source.get(repeat_small_coordinate(lane_x * 4 + (local & 3u), valid_width),
-                                     repeat_small_coordinate(block_y * 4 + (local >> 2), valid_height));
+                lane[j] = source.get(lane_x * 4 + repeat_small_coordinate(local & 3u, valid_width),
+                                     block_y * 4 + repeat_small_coordinate(local >> 2, valid_height));
             }
             samples[i] = {_mm_set_ps(lane[3].r, lane[2].r, lane[1].r, lane[0].r),
                           _mm_set_ps(lane[3].g, lane[2].g, lane[1].g, lane[0].g),

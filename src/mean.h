@@ -16,6 +16,27 @@ CDM_INLINE constexpr uint32_t texel_index(uint32_t sample)
 
 constexpr uint8_t texel_map[16] = {0, 1, 4, 5, 2, 3, 6, 7, 8, 9, 12, 13, 10, 11, 14, 15};
 
+// Logical texels in one physical 4x4 block; allocation size is not an active extent.
+CDM_INLINE uint32_t block_valid_extent(uint32_t size, uint32_t block)
+{
+    const uint32_t origin = block * 4;
+    return origin < size ? (size - origin < 4 ? size - origin : 4) : 0;
+}
+
+// A missing second parent reuses the first compressed block.
+CDM_INLINE uint32_t parent_valid_extent(uint32_t size, uint32_t parent)
+{
+    return block_valid_extent(size, size > 4 ? parent : 0);
+}
+
+// Clamp source texels before averaging; compressed padding must not contribute.
+CDM_INLINE uint32_t valid_texel_index(uint32_t texel, uint32_t width, uint32_t height)
+{
+    const uint32_t x = texel & 3u, y = texel >> 2;
+    return (y < height ? y : height - 1) * 4 + (x < width ? x : width - 1);
+}
+
+// Repeat within a block, then add its global origin at the call site.
 CDM_INLINE uint32_t repeat_small_coordinate(uint32_t value, uint32_t valid)
 {
     return valid < 4 ? value % valid : value;
@@ -61,6 +82,9 @@ struct MeanImage3
 
     CDM_INLINE void set(uint32_t x, uint32_t y, const Float3 &value) const
     {
+        // Keep writes compact and inside the active logical domain.
+        if (x >= width || y >= height)
+            return;
         const size_t index = size_t(y) * width + x;
         r[index] = value.r;
         g[index] = value.g;
@@ -89,6 +113,9 @@ struct MeanImage4
 
     CDM_INLINE void set(uint32_t x, uint32_t y, const Float4 &value) const
     {
+        // Keep writes compact and inside the active logical domain.
+        if (x >= width || y >= height)
+            return;
         const size_t index = size_t(y) * width + x;
         r[index] = value.r;
         g[index] = value.g;
@@ -117,6 +144,8 @@ template <uint32_t Channels> struct MeanImageChannels
     }
     CDM_INLINE void set(uint32_t x, uint32_t y, const Float3 &value) const
     {
+        if (x >= width || y >= height)
+            return;
         const size_t i = size_t(y) * width + x;
         planes[0][i] = value.r;
         if constexpr (Channels == 2)

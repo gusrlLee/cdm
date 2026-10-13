@@ -1,14 +1,16 @@
 #include "cpu.h"
 #include "core/task_dispatcher.h"
+#include "core/mean_simd.h"
 
 #include "codecs/bc1.h"
+#include "codecs/bc1_simd.h"
 
 #include <iostream>
 #include <algorithm>
 #include <memory>
 #include <new>
 
-static void generate_mip_level(Image &img, uint32_t level, MeanImage mean_img, uint32_t begin_row, uint32_t end_row)
+static void generate_mip_level(Image &img, uint32_t level, MeanImage mean_img, uint32_t begin_row, uint32_t end_row, bool use_simd)
 {
     const MipLevel &previous = img.mips[level - 1];
     const MipLevel &current = img.mips[level];
@@ -19,18 +21,54 @@ static void generate_mip_level(Image &img, uint32_t level, MeanImage mean_img, u
     for (uint32_t by = begin_row; by < end_row; ++by)
     {
         const uint32_t valid_height = bc1::block_valid_extent(current.height, by);
+        uint32_t bx = 0;
 
-        for (uint32_t bx = 0; bx < current.block_count_x; ++bx)
+        // Process four full blocks at a time.
+        if (use_simd && valid_height == 4)
+        {
+            while (bx + 4 <= current.block_count_x)
+            {
+                // Keep partial blocks on the scalar path.
+                if (bx * 4 + 16 > current.width)
+                    break;
+
+                const size_t output = static_cast<size_t>(by) * current.block_count_x + bx;
+
+                if (level >= 2)
+                {
+                    if (bx * 4 + 16 > mean_img.width || by * 4 + 4 > mean_img.height)
+                        break;
+
+                    bc1::generate_child_blocks_from_means_x4(mean_img, bx, by, img.is_srgb, dst + output);
+                }
+                else
+                {
+                    const uint32_t x0 = bx * 2;
+                    const uint32_t y0 = by * 2;
+
+                    // Require full parent blocks and valid mean storage.
+                    if (x0 * 4 + 32 > previous.width || y0 * 4 + 8 > previous.height || x0 + 8 > mean_img.width || y0 + 2 > mean_img.height)
+                        break;
+
+                    const bc1::Block *row0 = src + static_cast<size_t>(y0) * previous.block_count_x + x0;
+                    const bc1::Block *row1 = row0 + previous.block_count_x;
+
+                    bc1::generate_child_blocks_x4(row0, row1, img.is_srgb, mean_img, x0, y0, dst + output);
+                }
+
+                bx += 4;
+            }
+        }
+
+        // Process remaining blocks, or all blocks in scalar mode.
+        for (; bx < current.block_count_x; ++bx)
         {
             const uint32_t valid_width = bc1::block_valid_extent(current.width, bx);
             const size_t output = static_cast<size_t>(by) * current.block_count_x + bx;
 
             if (level >= 2)
             {
-                dst[output] = bc1::generate_child_block_from_means_scalar(
-                    mean_img, bx, by,
-                    img.is_srgb, valid_width, valid_height);
-
+                dst[output] = bc1::generate_child_block_from_means_scalar(mean_img, bx, by, img.is_srgb, valid_width, valid_height);
                 continue;
             }
 
@@ -39,15 +77,16 @@ static void generate_mip_level(Image &img, uint32_t level, MeanImage mean_img, u
             const uint32_t x1 = std::min(x0 + 1, previous.block_count_x - 1);
             const uint32_t y1 = std::min(y0 + 1, previous.block_count_y - 1);
 
-            const bc1::Block* row0 = src + static_cast<size_t>(y0) * previous.block_count_x;
-            const bc1::Block* row1 = src + static_cast<size_t>(y1) * previous.block_count_x;
+            const bc1::Block *row0 = src + static_cast<size_t>(y0) * previous.block_count_x;
+            const bc1::Block *row1 = src + static_cast<size_t>(y1) * previous.block_count_x;
 
             Float3 parent_means[4];
+
             dst[output] = bc1::generate_child_block_scalar(
                 row0[x0], row0[x1], row1[x0], row1[x1],
                 img.is_srgb, parent_means, valid_width, valid_height,
                 previous.width - x0 * 4, previous.height - y0 * 4);
-           
+
             mean_img.set(x0, y0, parent_means[0]);
             mean_img.set(x1, y0, parent_means[1]);
             mean_img.set(x0, y1, parent_means[2]);
@@ -56,7 +95,7 @@ static void generate_mip_level(Image &img, uint32_t level, MeanImage mean_img, u
     }
 }
 
-bool generate_mipmaps_cpu(Image& img)
+bool generate_mipmaps_cpu(Image &img, bool use_simd)
 {
     if (!img.data || img.format != Format::BC1 || img.mip_count == 0)
         return false;
@@ -88,7 +127,7 @@ bool generate_mipmaps_cpu(Image& img)
     static TaskDispatcher dispatcher;
     for (uint32_t level = 1; level < img.mip_count; ++level)
     {
-        const MipLevel& current = img.mips[level];
+        const MipLevel &current = img.mips[level];
 
         if (level >= 3)
         {
@@ -97,23 +136,24 @@ bool generate_mipmaps_cpu(Image& img)
 
             const size_t pixels = static_cast<size_t>(scratch.width) * scratch.height;
             dispatcher.parallel_rows(scratch.height, pixels,
-                [&](uint32_t begin, uint32_t end)
-                {
-                    downsample_means(means, scratch, begin, end);
-                }
-            );
-        
+                                     [&](uint32_t begin, uint32_t end)
+                                     {
+                                         if (use_simd)
+                                             downsample_means_simd(means, scratch, begin, end);
+                                         else
+                                             downsample_means(means, scratch, begin, end);
+                                     });
+
             std::swap(means, scratch);
-        }        
+        }
 
         const size_t blocks = static_cast<size_t>(current.block_count_x) * current.block_count_y;
-        dispatcher.parallel_rows(current.block_count_y, blocks, 
-            [&](uint32_t begin, uint32_t end)
-            {
-                generate_mip_level(img, level, means, begin, end);
-            }
-        );
+        dispatcher.parallel_rows(current.block_count_y, blocks,
+                                 [&](uint32_t begin, uint32_t end)
+                                 {
+                                     generate_mip_level(img, level, means, begin, end, use_simd);
+                                 });
     }
-    
+
     return true;
 }

@@ -2,5 +2,5 @@
 
 #include "core/mipmap.h"
 
-// Generate the mip chain using the scalar CPU path
-bool generate_mipmaps_cpu(Image& image);
+// Generate mipmaps using scalar or SIMD calculations.
+bool generate_mipmaps_cpu(Image& image, bool use_simd = false);

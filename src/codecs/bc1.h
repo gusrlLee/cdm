@@ -286,89 +286,34 @@ namespace bc1
         Float3 palette[4];
         get_palette(block, is_srgb, palette, true);
 
-        struct ProjectionEntry
-        {
-            float value;
-            uint32_t selector;
-        };
+        float palette_projections[4];
 
-        ProjectionEntry sorted[4];
-        
-        // Sort palette proejections and prefer lower selectors on ties 
         for (uint32_t selector = 0; selector < 4; ++selector)
         {
-            const float projection = dot(palette[selector] - mean, axis);
-            const ProjectionEntry entry = {projection, selector};
-            uint32_t position = selector;
-
-            while (position > 0)
-            {
-                const ProjectionEntry previous = sorted[position - 1];
-                const bool smaller = entry.value < previous.value;
-                const bool tied = entry.value == previous.value;
-                const bool lower_selector = entry.selector < previous.selector;
-
-                if (!smaller && !(tied && lower_selector))
-                    break;
-
-                sorted[position] = previous;
-                --position;
-            }
-            sorted[position] = entry;
+            palette_projections[selector] = dot(palette[selector] - mean, axis);
         }
 
-        ProjectionEntry unique[4];
-        uint32_t unique_count = 0;
-
-        // Keep the lowest selector for duplicate projections
-        for (const ProjectionEntry& entry : sorted)
-        {
-            if (unique_count > 0 && entry.value == unique[unique_count - 1].value)
-            {
-                uint32_t &selector = unique[unique_count - 1].selector;
-                selector = std::min(selector, entry.selector);
-            }
-            else 
-            {
-                unique[unique_count++] = entry;
-            }
-        }
-
-        float boundaries[3];
-        uint32_t boundary_selectors[3];
-
-        // Place a boundary halfway between adjacent projections
-        for (uint32_t i = 1; i < unique_count; ++i)
-        {
-            const ProjectionEntry &left = unique[i - 1];
-            const ProjectionEntry &right = unique[i];
-
-            boundaries[i - 1] = (left.value + right.value) * 0.5f;
-            boundary_selectors[i - 1] = std::min(left.selector, right.selector);
-        }
-
+        // Choose the nearest palette projection for each sample.
         for (uint32_t i = 0; i < 16; ++i)
         {
-            uint32_t selector = unique[0].selector;
+            float best_distance = 1e30f;
+            uint32_t best_selector = 0;
 
-            for (uint32_t j = 1; j < unique_count; ++j)
+            for (uint32_t selector = 0; selector < 4; ++selector)
             {
-                const float boundary = boundaries[j - 1];
-                if (projections[i] < boundary)
+                const float delta = projections[i] - palette_projections[selector];
+                const float distance = delta * delta;
+
+                // Strict comparison keeps the lower selector on ties.
+                if (distance < best_distance)
                 {
-                    break;
+                    best_distance = distance;
+                    best_selector = selector;
                 }
+            }
 
-                if (projections[i] == boundary)
-                {
-                    selector = boundary_selectors[j - 1];
-                    break;
-                }
-
-                selector = unique[j].selector;
-            } 
-
-            block.indices |= selector << (2 * texel_map[i]);
+            // Place the selector in its row-major texel position.
+            block.indices |= best_selector << (2 * texel_map[i]);
         }
 
         return block;

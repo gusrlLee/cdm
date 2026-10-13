@@ -2,19 +2,35 @@
 #include "cpu.h"
 
 #include <iostream>
+#include <cstring>
+#include <chrono>
+
+uint64_t GetTime()
+{
+    return std::chrono::time_point_cast<std::chrono::microseconds>( std::chrono::high_resolution_clock::now() ).time_since_epoch().count();
+}
 
 int main(int argc, char* argv[])
 {
-    // Expect an input DDS path and an output DDS path.
-    if (argc != 3)
+    // Accept an optional CPU mode; default to scalar.
+    if (argc != 3 && argc != 4)
     {
-        std::cerr << "Usage : " << argv[0] << " <input.dds> <output.dds>" << std::endl;
+        std::cerr << "Usage: " << argv[0] << " <input.dds> <output.dds> [scalar|simd]" << std::endl;
         return 1;
     }
 
     // Give each command-line path a clear name
     const char* input_path = argv[1];
     const char* output_path = argv[2];
+    const char* mode = argc == 4 ? argv[3] : "scalar";
+
+    if (std::strcmp(mode, "scalar") != 0 && std::strcmp(mode, "simd") != 0)
+    {
+        std::cerr << "Unknown CPU mode: " << mode << std::endl;
+        return 1;
+    }
+
+    const bool use_simd = std::strcmp(mode, "simd") == 0;
 
     Image image{};
 
@@ -43,11 +59,19 @@ int main(int argc, char* argv[])
     }
 
     // Generate all mip levels from the base image.
-    if (!generate_mipmaps_cpu(image))
+    const uint64_t start = GetTime();
+    const bool generated = generate_mipmaps_cpu(image, use_simd);
+    const uint64_t end = GetTime();
+
+    if (!generated)
     {
         std::cerr << "Failed to generate mipmaps" << std::endl;
+        free_image(&image);
         return 1;
     }
+
+    const double total_generation_time = static_cast<double>(end - start) / 1000.0;
+    std::cout << "Total generation time (" << mode <<  "): " << total_generation_time << " ms" << std::endl;
 
     // Save the generated mip chain.
     if (!save_dds(output_path, &image))

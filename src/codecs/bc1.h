@@ -75,7 +75,7 @@ namespace bc1
     }
 
     // Expand an RGB565 endpont to RGB8 using bit replication.
-    inline Rgb8 decode_rgb565(uint16_t color)
+    CDM_INLINE Rgb8 decode_rgb565(uint16_t color)
     {
         const uint32_t r = (color >> 11) & 31u;
         const uint32_t g = (color >> 5) & 63u;
@@ -84,7 +84,7 @@ namespace bc1
         return {(r << 3) | (r >> 2), (g << 2) | (g >> 4), (b << 3) | (b >> 2)};
     }
 
-    inline Rgb8 palette_color_rgb8(uint16_t c0, uint16_t c1, uint32_t selector, bool opaque = false)
+    CDM_INLINE Rgb8 palette_color_rgb8(uint16_t c0, uint16_t c1, uint32_t selector, bool opaque = false)
     {
         const Rgb8 a = decode_rgb565(c0);
         const Rgb8 b = decode_rgb565(c1);
@@ -145,14 +145,14 @@ namespace bc1
     }
 
     // Sum one-bit flags within each 2x2 quadrant
-    inline uint32_t count_2x2_regions(uint32_t flags)
+    CDM_INLINE uint32_t count_2x2_regions(uint32_t flags)
     {
         const uint32_t horizontal = (flags & 0x11111111u) + ((flags >> 2) & 0x11111111u);
         return (horizontal & 0x00ff00ffu) + ((horizontal >> 8) & 0x00ff00ffu);
     }
 
     // Count matching selectors in each quadrant
-    inline uint32_t selector_region_counts(uint32_t indices, uint32_t selector)
+    CDM_INLINE uint32_t selector_region_counts(uint32_t indices, uint32_t selector)
     {
         uint32_t different = indices ^ (selector * 0x55555555u);
         different |= different >> 1;

@@ -6,11 +6,14 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 add_executable(
     ${PROJECT_NAME}
+
     src/main.cpp
     src/dds.h
     src/dds.cpp
     src/cpu.h
     src/cpu.cpp
+    src/gpu.h
+    src/gpu.cu
 
     src/core/color.h
     src/core/mipmap.h
@@ -18,8 +21,14 @@ add_executable(
     src/core/math.h
     src/core/mean.h
     src/core/task_dispatcher.h
+    src/core/buffer.h
+    src/core/platform.h
+    src/core/warp.cuh
+    src/core/color_cuda.cuh
 
     src/codecs/bc1.h
+    src/codecs/bc1_simd.h
+    src/codecs/bc1_cuda.cuh
 )
 
 target_include_directories(${PROJECT_NAME} PRIVATE 

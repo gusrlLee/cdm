@@ -14,7 +14,7 @@ struct MeanImage
     uint32_t height = 0;
 
     // Clamp reads to the valid image area.
-    Float3 get(uint32_t x, uint32_t y) const
+    CDM_INLINE Float3 get(uint32_t x, uint32_t y) const
     {
         x = x < width ? x : width - 1;
         y = y < height ? y : height - 1;
@@ -24,7 +24,7 @@ struct MeanImage
     }
 
     // Ignore writes outside the valid image area.
-    void set(uint32_t x, uint32_t y, const Float3& color) const
+    CDM_INLINE void set(uint32_t x, uint32_t y, const Float3& color) const
     {
         if (x >= width || y >= height)
         {

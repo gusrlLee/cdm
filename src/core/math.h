@@ -1,5 +1,7 @@
 #pragma once
 
+#include "platform.h"
+
 #include <cmath>
 
 constexpr float inv_sqrt3 = 0.57735027f;
@@ -13,19 +15,19 @@ struct Float3
 };
 
 // Add the corresponding color components.
-inline Float3 operator+(const Float3 &a, const Float3 &b)
+CDM_INLINE Float3 operator+(const Float3 &a, const Float3 &b)
 {
     return {a.r + b.r, a.g + b.g, a.b + b.b};
 }
 
 // Scale all color components by the same value.
-inline Float3 operator*(const Float3 &color, float scale)
+CDM_INLINE Float3 operator*(const Float3 &color, float scale)
 {
     return {color.r * scale, color.g * scale, color.b * scale};
 }
 
 // Accumulate a color into an existing value.
-inline Float3 &operator+=(Float3 &a, const Float3 &b)
+CDM_INLINE Float3 &operator+=(Float3 &a, const Float3 &b)
 {
     a.r += b.r;
     a.g += b.g;
@@ -45,13 +47,13 @@ struct SymMat3
 };
 
 // Subtract the corresponding color components.
-inline Float3 operator-(const Float3 &a, const Float3 &b)
+CDM_INLINE Float3 operator-(const Float3 &a, const Float3 &b)
 {
     return {a.r - b.r, a.g - b.g, a.b - b.b};
 }
 
 // Accumulate a weighted outer product into the matrix.
-inline void accumulate_outer(SymMat3 &matrix, const Float3 &value, float weight)
+CDM_INLINE void accumulate_outer(SymMat3 &matrix, const Float3 &value, float weight)
 {
     matrix.rr += value.r * value.r * weight;
     matrix.rg += value.r * value.g * weight;
@@ -62,19 +64,19 @@ inline void accumulate_outer(SymMat3 &matrix, const Float3 &value, float weight)
 }
 
 // Compute the dot product of two vectors.
-inline float dot(const Float3 &a, const Float3 &b)
+CDM_INLINE float dot(const Float3 &a, const Float3 &b)
 {
     return a.r * b.r + a.g * b.g + a.b * b.b;
 }
 
 // Compute the squared vector length.
-inline float length_sq(const Float3 &value)
+CDM_INLINE float length_sq(const Float3 &value)
 {
     return dot(value, value);
 }
 
 // Multiply a symmetric matrix by a vector.
-inline Float3 multiply(const SymMat3 &matrix, const Float3 &value)
+CDM_INLINE Float3 multiply(const SymMat3 &matrix, const Float3 &value)
 {
     return {
         matrix.rr * value.r + matrix.rg * value.g + matrix.rb * value.b,
@@ -83,7 +85,7 @@ inline Float3 multiply(const SymMat3 &matrix, const Float3 &value)
 }
 
 // Esitmate the color axis
-inline Float3 compute_principal_axis(const SymMat3 &cov)
+CDM_INLINE Float3 compute_principal_axis(const SymMat3 &cov)
 {
     const float diagonal_sq = cov.rr * cov.rr + cov.gg * cov.gg + cov.bb * cov.bb;
     const float off_diagonal_sq = cov.rg * cov.rg + cov.rb * cov.rb + cov.gb * cov.gb;
@@ -117,7 +119,7 @@ inline Float3 compute_principal_axis(const SymMat3 &cov)
     return next * (1.0f / std::sqrt(next_length_sq));
 }
 
-inline Float3 clamp01(const Float3 &color)
+CDM_INLINE Float3 clamp01(const Float3 &color)
 {
     const float r = color.r < 0.0f ? 0.0f : (color.r > 1.0f ? 1.0f : color.r);
     const float g = color.g < 0.0f ? 0.0f : (color.g > 1.0f ? 1.0f : color.g);

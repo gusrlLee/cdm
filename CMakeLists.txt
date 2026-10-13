@@ -6,22 +6,24 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 add_executable(
     ${PROJECT_NAME}
-    src/dds.h
-    src/mip.h
-    src/base.h
-    src/mean.h
-    src/bc1.h
-    src/bc2.h
-    src/bc3.h
-    src/bc4.h
-    src/bc5.h
-    src/bc6h.h
-    src/bc7.h
-    src/bc7_tables.inl
     src/main.cpp
+    src/dds.h
     src/dds.cpp
+    src/cpu.h
     src/cpu.cpp
-    src/gpu.cu
+
+    src/core/color.h
+    src/core/mipmap.h
+    src/core/mipmap.cpp
+    src/core/math.h
+    src/core/mean.h
+    src/core/task_dispatcher.h
+
+    src/codecs/bc1.h
+)
+
+target_include_directories(${PROJECT_NAME} PRIVATE 
+    ${CMAKE_SOURCE_DIR}/src
 )
 
 set_target_properties(${PROJECT_NAME} PROPERTIES

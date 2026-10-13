@@ -254,7 +254,9 @@ bool save_dds(const char *filepath, const Image *image)
     uint32_t dxgi_format;
     switch (image->format)
     {
-    case Format::BC1: dxgi_format = image->is_srgb ? 72 : 71; break;
+    case Format::BC1:
+        dxgi_format = image->is_srgb ? 72 : 71;
+        break;
     case Format::BC2: dxgi_format = image->is_srgb ? 75 : 74; break;
     case Format::BC3: dxgi_format = image->is_srgb ? 78 : 77; break;
     case Format::BC4_UNORM: dxgi_format = 80; break;
@@ -263,7 +265,8 @@ bool save_dds(const char *filepath, const Image *image)
     case Format::BC5_SNORM: dxgi_format = 84; break;
     case Format::BC6H_UF16: dxgi_format = 95; break;
     case Format::BC7: dxgi_format = image->is_srgb ? 99 : 98; break;
-    default: return false;
+    default:
+        return false;
     }
 
     FILE *fp = fopen(filepath, "wb");

@@ -1,14 +1,21 @@
 #pragma once
 
-#include <cstdint>
 #include <cstddef>
+#include <cstdint>
 
-// Execution strategy for mip generation; independent of the block compression format.
-enum class Backend
+// Describe one mip level inside the image buffer.
+struct MipLevel
 {
-    CPU,
-    CPU_SIMD,
-    CUDA,
+    uint32_t width = 0;
+    uint32_t height = 0;
+
+    // Count 4x4 compressed blocks, including partial edge blocks.
+    uint32_t block_count_x = 0;
+    uint32_t block_count_y = 0;
+
+    // Locate this mip level in the image buffer
+    size_t byte_offset = 0;
+    size_t byte_size = 0;
 };
 
 enum class Format
@@ -33,6 +40,7 @@ constexpr size_t block_size(Format format)
     case Format::BC4_UNORM:
     case Format::BC4_SNORM:
         return 8;
+
     case Format::BC2:
     case Format::BC3:
     case Format::BC5_UNORM:
@@ -40,42 +48,30 @@ constexpr size_t block_size(Format format)
     case Format::BC6H_UF16:
     case Format::BC7:
         return 16;
+
     default:
         return 0;
     }
 }
 
-struct Options
-{
-    Backend backend = Backend::CPU_SIMD;
-};
-
-// Dimensions and byte range of one mip level within Image::data.
-struct MipLevel
-{
-    uint32_t width;
-    uint32_t height;
-    uint32_t block_count_x;
-    uint32_t block_count_y;
-    size_t byte_offset;
-    size_t byte_size;
-};
-
 constexpr uint32_t MAX_MIP_LEVELS = 16;
 
-// A full mip chain as one flat allocation; mips[level] indexes into it.
 struct Image
 {
     uint32_t width = 0;
     uint32_t height = 0;
     uint32_t mip_count = 0;
-    Format format = Format::Unknown;
 
+    Format format = Format::Unknown;
     bool is_srgb = false;
-    MipLevel mips[MAX_MIP_LEVELS];
+
+    MipLevel mips[MAX_MIP_LEVELS]{};
+
+    // Own the buffer shared by all mip levels
     uint8_t *data = nullptr;
     size_t data_size = 0;
 };
 
-bool generate_mipmaps(Image *image, const Options &options);
-bool prepare_mipmap_backend(const Image *image, Backend backend);
+
+// Allocate space for the mip chain while preserving mip 0.
+bool prepare_mip_chain(Image& image);

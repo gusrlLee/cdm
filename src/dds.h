@@ -1,6 +1,6 @@
 #pragma once
 
-#include "mip.h"
+#include "core/mipmap.h"
 
 bool load_dds(const char* filepath, Image* out_image);
 bool save_dds(const char* filepath, const Image* image);

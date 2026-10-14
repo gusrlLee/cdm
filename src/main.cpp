@@ -57,9 +57,21 @@ int main(int argc, char *argv[])
     }
 
     // check dds file format
-    if (image.format != Format::BC1)
+    switch (image.format)
     {
-        std::cerr << "Only BC1 DDS files are supported" << std::endl;
+    case Format::BC1:
+        break;
+    case Format::BC4_UNORM:
+        if (backend != Backend::Scalar)
+        {
+            std::cerr << "BC4 UNORM requires the scalar backend" << std::endl;
+            free_image(&image);
+            return 1;
+        }
+        break;
+
+    default:
+        std::cerr << "Mip generation supports only BC1 and BC4 UNORM" << std::endl;
         free_image(&image);
         return 1;
     }

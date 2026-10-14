@@ -5,12 +5,14 @@
 #include "codecs/bc1.h"
 #include "codecs/bc1_simd.h"
 
+#include "codecs/bc4.h"
+
 #include <iostream>
 #include <algorithm>
 #include <memory>
 #include <new>
 
-static void generate_mip_level(Image &img, uint32_t level, MeanImage mean_img, uint32_t begin_row, uint32_t end_row, bool use_simd)
+static void generate_mip_level_bc1(Image &img, uint32_t level, MeanImage mean_img, uint32_t begin_row, uint32_t end_row, bool use_simd)
 {
     const MipLevel &previous = img.mips[level - 1];
     const MipLevel &current = img.mips[level];
@@ -95,14 +97,79 @@ static void generate_mip_level(Image &img, uint32_t level, MeanImage mean_img, u
     }
 }
 
+// Generate BC4 blocks within the assigned rows
+static void generate_mip_level_bc4(Image &img, uint32_t level, MeanImage mean_img, uint32_t begin_row, uint32_t end_row)
+{
+    const MipLevel &previous = img.mips[level - 1];
+    const MipLevel &current = img.mips[level];
+
+    const bc4::Block *src = reinterpret_cast<const bc4::Block *>(img.data + previous.byte_offset);
+    bc4::Block *dst = reinterpret_cast<bc4::Block *>(img.data + current.byte_offset);
+
+    for (uint32_t by = begin_row; by < end_row; ++by)
+    {
+        const uint32_t valid_height = std::min(4u, current.height - by * 4);
+
+        for (uint32_t bx = 0; bx < current.block_count_x; ++bx)
+        {
+            const uint32_t valid_width = std::min(4u, current.width - bx * 4);
+            const size_t output = static_cast<size_t>(by) * current.block_count_x + bx;
+
+            if (level >= 2)
+            {
+                dst[output] = bc4::generate_child_block_from_means_scalar(mean_img, bx, by, valid_width, valid_height);
+                continue;
+            }
+
+            const uint32_t x0 = bx * 2;
+            const uint32_t y0 = by * 2;
+
+            const uint32_t x1 = std::min(x0 + 1, previous.block_count_x - 1);
+            const uint32_t y1 = std::min(y0 + 1, previous.block_count_y - 1);
+
+            const bc4::Block *row0 = src + static_cast<size_t>(y0) * previous.block_count_x;
+            const bc4::Block *row1 = src + static_cast<size_t>(y1) * previous.block_count_x;
+
+            float parent_means[4];
+            dst[output] = bc4::generate_child_block_scalar(
+                row0[x0], row0[x1], row1[x0], row1[x1],
+                parent_means, valid_width, valid_height,
+                previous.width - x0 * 4, previous.height - y0 * 4);
+
+            // Store the scalar mean and clear the unused channels.
+            mean_img.set(x0, y0, {parent_means[0], 0.0f, 0.0f});
+            mean_img.set(x1, y0, {parent_means[1], 0.0f, 0.0f});
+            mean_img.set(x0, y1, {parent_means[2], 0.0f, 0.0f});
+            mean_img.set(x1, y1, {parent_means[3], 0.0f, 0.0f});
+        }
+    }
+}
+
 bool generate_mipmaps_cpu(Image &img, bool use_simd)
 {
-    if (!img.data || img.format != Format::BC1 || img.mip_count == 0)
+    if (!img.data || img.mip_count == 0)
         return false;
 
+    // Validate the format before allocating mean buffers.
+    switch (img.format)
+    {
+        case Format::BC1:
+        break;
+        
+        case Format::BC4_UNORM:
+        // BC4 currently supports only scalar processing.
+        if (use_simd)
+        return false;
+        break;
+        
+        default:
+        return false;
+    }
+        
+    // No additional mip levels need to be generated.
     if (img.mip_count == 1)
         return true;
-
+    
     const uint32_t bw = img.mips[0].block_count_x;
     const uint32_t bh = img.mips[0].block_count_y;
     const uint32_t sw = (bw + 1) / 2;
@@ -148,11 +215,26 @@ bool generate_mipmaps_cpu(Image &img, bool use_simd)
         }
 
         const size_t blocks = static_cast<size_t>(current.block_count_x) * current.block_count_y;
-        dispatcher.parallel_rows(current.block_count_y, blocks,
-                                 [&](uint32_t begin, uint32_t end)
-                                 {
-                                     generate_mip_level(img, level, means, begin, end, use_simd);
-                                 });
+
+        dispatcher.parallel_rows(
+            current.block_count_y, blocks,
+            [&](uint32_t begin, uint32_t end)
+            {
+                // Dispatch once per row task, outside the block loop.
+                switch (img.format)
+                {
+                case Format::BC1:
+                    generate_mip_level_bc1(img, level, means, begin, end, use_simd);
+                    break;
+
+                case Format::BC4_UNORM:
+                    generate_mip_level_bc4(img, level, means, begin, end);
+                    break;
+
+                default:
+                    break; // Unsupported formats were rejected above.
+                }
+            });
     }
 
     return true;

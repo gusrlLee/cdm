@@ -62,9 +62,9 @@ int main(int argc, char *argv[])
     case Format::BC1:
         break;
     case Format::BC4_UNORM:
-        if (backend != Backend::Scalar)
+        if (backend == Backend::CUDA)
         {
-            std::cerr << "BC4 UNORM requires the scalar backend" << std::endl;
+            std::cerr << "BC4 UNORM does not support the CUDA backend" << std::endl;
             free_image(&image);
             return 1;
         }

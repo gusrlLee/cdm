@@ -6,6 +6,7 @@
 #include "codecs/bc1_simd.h"
 
 #include "codecs/bc4.h"
+#include "codecs/bc4_simd.h"
 
 #include <iostream>
 #include <algorithm>
@@ -98,7 +99,7 @@ static void generate_mip_level_bc1(Image &img, uint32_t level, MeanImage mean_im
 }
 
 // Generate BC4 blocks within the assigned rows
-static void generate_mip_level_bc4(Image &img, uint32_t level, MeanImage mean_img, uint32_t begin_row, uint32_t end_row)
+static void generate_mip_level_bc4(Image &img, uint32_t level, MeanImage mean_img, uint32_t begin_row, uint32_t end_row, bool use_simd)
 {
     const MipLevel &previous = img.mips[level - 1];
     const MipLevel &current = img.mips[level];
@@ -110,10 +111,47 @@ static void generate_mip_level_bc4(Image &img, uint32_t level, MeanImage mean_im
     {
         const uint32_t valid_height = std::min(4u, current.height - by * 4);
 
-        for (uint32_t bx = 0; bx < current.block_count_x; ++bx)
+        uint32_t bx = 0;
+
+        if (use_simd && valid_height == 4)
         {
-            const uint32_t valid_width = std::min(4u, current.width - bx * 4);
-            const size_t output = static_cast<size_t>(by) * current.block_count_x + bx;
+            while (bx + 4 <= current.block_count_x)
+            {
+                if (bx * 4 + 16 > current.width)
+                    break;
+
+                const size_t output = static_cast<size_t>(by) * current.block_count_x + bx;
+
+                if (level >= 2)
+                {
+                    if (bx * 4 + 16 > mean_img.width || by * 4 + 4 > mean_img.height)
+                        break;
+
+                    bc4::generate_child_blocks_from_means_x4(mean_img, bx, by, dst + output);
+                }
+                else
+                {
+                    const uint32_t x0 = bx * 2;
+                    const uint32_t y0 = by * 2;
+
+                    if (x0 * 4 + 32 > previous.width || y0 * 4 + 8 > previous.height || x0 + 8 > mean_img.width || y0 + 2 > mean_img.height)
+                        break;
+
+                    const bc4::Block *row0 = src + static_cast<size_t>(y0) * previous.block_count_x + x0;
+                    const bc4::Block *row1 = row0 + previous.block_count_x;
+                    bc4::generate_child_blocks_x4(row0, row1, mean_img, x0, y0, dst + output);
+                }
+
+                bx += 4;
+            }
+        }
+
+        for (; bx < current.block_count_x; ++bx)
+        {
+            const uint32_t valid_width =
+                std::min(4u, current.width - bx * 4);
+            const size_t output =
+                static_cast<size_t>(by) * current.block_count_x + bx;
 
             if (level >= 2)
             {
@@ -123,7 +161,6 @@ static void generate_mip_level_bc4(Image &img, uint32_t level, MeanImage mean_im
 
             const uint32_t x0 = bx * 2;
             const uint32_t y0 = by * 2;
-
             const uint32_t x1 = std::min(x0 + 1, previous.block_count_x - 1);
             const uint32_t y1 = std::min(y0 + 1, previous.block_count_y - 1);
 
@@ -131,12 +168,12 @@ static void generate_mip_level_bc4(Image &img, uint32_t level, MeanImage mean_im
             const bc4::Block *row1 = src + static_cast<size_t>(y1) * previous.block_count_x;
 
             float parent_means[4];
+
             dst[output] = bc4::generate_child_block_scalar(
                 row0[x0], row0[x1], row1[x0], row1[x1],
                 parent_means, valid_width, valid_height,
                 previous.width - x0 * 4, previous.height - y0 * 4);
 
-            // Store the scalar mean and clear the unused channels.
             mean_img.set(x0, y0, {parent_means[0], 0.0f, 0.0f});
             mean_img.set(x1, y0, {parent_means[1], 0.0f, 0.0f});
             mean_img.set(x0, y1, {parent_means[2], 0.0f, 0.0f});
@@ -153,23 +190,20 @@ bool generate_mipmaps_cpu(Image &img, bool use_simd)
     // Validate the format before allocating mean buffers.
     switch (img.format)
     {
-        case Format::BC1:
+    case Format::BC1:
         break;
-        
-        case Format::BC4_UNORM:
-        // BC4 currently supports only scalar processing.
-        if (use_simd)
-        return false;
+
+    case Format::BC4_UNORM:
         break;
-        
-        default:
+
+    default:
         return false;
     }
-        
+
     // No additional mip levels need to be generated.
     if (img.mip_count == 1)
         return true;
-    
+
     const uint32_t bw = img.mips[0].block_count_x;
     const uint32_t bh = img.mips[0].block_count_y;
     const uint32_t sw = (bw + 1) / 2;
@@ -228,7 +262,7 @@ bool generate_mipmaps_cpu(Image &img, bool use_simd)
                     break;
 
                 case Format::BC4_UNORM:
-                    generate_mip_level_bc4(img, level, means, begin, end);
+                    generate_mip_level_bc4(img, level, means, begin, end, use_simd);
                     break;
 
                 default:

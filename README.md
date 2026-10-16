@@ -17,8 +17,9 @@
   * BC4_SNORM is not implemented yet.
   * Input: Support both 8-value and 6-value interpolation modes.
   * Output: 8-value mode preferred (no adaptive interpolation mode selection).
-  * Support Scalar backend only.
-  * SIMD and CUDA backends are not implemented yet.
+  * Scalar, SIMD, and CUDA backends are implemented and build successfully.
+  * SIMD processes four full blocks at a time, with scalar fallback for remaining and partial blocks.
+  * Output correctness, edge cases, CUDA memory checks, and performance validation are pending experimental setup.
   * Support Compression-Domain Mipmap Generation.
 * BC5
   * Not implemented yet.
@@ -35,6 +36,7 @@
 * BC2
 * BC3
 * BC4
+  * Not measured yet; experimental setup is pending.
 * BC5
 * BC6H
 * BC7

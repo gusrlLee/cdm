@@ -8,6 +8,10 @@
 #include "codecs/bc4.h"
 #include "codecs/bc4_simd.h"
 #include "codecs/bc7_simd.h"
+#include "codecs/bc5_simd.h"
+#include "codecs/bc2_simd.h"
+#include "codecs/bc3_simd.h"
+#include "codecs/bc6h_simd.h"
 
 #include <iostream>
 #include <algorithm>
@@ -183,6 +187,149 @@ static void generate_mip_level_bc4(Image &img, uint32_t level, MeanImage mean_im
     }
 }
 
+static void generate_mip_level_bc5_bc6h(Image &img, uint32_t level, const MeanImage &means,
+                                   uint32_t begin_row, uint32_t end_row, bool use_simd)
+{
+    const MipLevel &previous = img.mips[level - 1];
+    const MipLevel &current = img.mips[level];
+    const auto *src = img.data + previous.byte_offset;
+    auto *dst = img.data + current.byte_offset;
+    for (uint32_t by = begin_row; by < end_row; ++by)
+    {
+        for (uint32_t bx = 0; bx < current.block_count_x;)
+        {
+            const uint32_t height = std::min(4u, current.height - by * 4);
+            const bool vectorize = use_simd && height == 4 && bx * 4 + 16 <= current.width;
+            const uint32_t lanes = vectorize ? 4 : 1;
+            Float3 samples[4][16];
+            for (uint32_t lane = 0; lane < lanes; ++lane)
+            {
+                const uint32_t x = bx + lane;
+                const uint32_t width = std::min(4u, current.width - x * 4);
+                if (level >= 2)
+                {
+                    for (uint32_t i = 0; i < 16; ++i)
+                    {
+                        const uint32_t texel = bc1::texel_map[i];
+                        samples[lane][i] = means.get(x * 4 + (texel % 4) % width, by * 4 + (texel / 4) % height);
+                    }
+                    continue;
+                }
+                const uint32_t x0 = x * 2, y0 = by * 2;
+                for (uint32_t parent = 0; parent < 4; ++parent)
+                {
+                    const uint32_t sx = std::min(x0 + (parent & 1u), previous.block_count_x - 1);
+                    const uint32_t sy = std::min(y0 + (parent >> 1u), previous.block_count_y - 1);
+                    const uint8_t *block = src + (static_cast<size_t>(sy) * previous.block_count_x + sx) * 16;
+                    const uint32_t pw = std::min(4u, previous.width - sx * 4);
+                    const uint32_t ph = std::min(4u, previous.height - sy * 4);
+                    if (img.format == Format::BC5_UNORM || img.format == Format::BC5_SNORM)
+                        bc5::get_quadrant_means(*reinterpret_cast<const bc5::Block *>(block), samples[lane] + parent * 4, pw, ph, img.format == Format::BC5_SNORM);
+                    else
+                        bc6h::get_quadrant_means(*reinterpret_cast<const bc6h::Block *>(block), samples[lane] + parent * 4, pw, ph);
+                }
+                bc1::repeat_small_samples(samples[lane], width, height);
+                for (uint32_t parent = 0; parent < 4; ++parent)
+                {
+                    const Float3 *q = samples[lane] + parent * 4;
+                    means.set(x0 + (parent & 1u), y0 + (parent >> 1u), (q[0] + q[1] + q[2] + q[3]) * 0.25f);
+                }
+            }
+            const size_t output = static_cast<size_t>(by) * current.block_count_x + bx;
+            if (vectorize)
+            {
+                Float3x4 packed[16];
+                for (uint32_t i = 0; i < 16; ++i)
+                    packed[i] = {_mm_setr_ps(samples[0][i].r, samples[1][i].r, samples[2][i].r, samples[3][i].r),
+                                 _mm_setr_ps(samples[0][i].g, samples[1][i].g, samples[2][i].g, samples[3][i].g),
+                                 _mm_setr_ps(samples[0][i].b, samples[1][i].b, samples[2][i].b, samples[3][i].b)};
+                if (img.format == Format::BC5_UNORM || img.format == Format::BC5_SNORM)
+                    bc5::encode_samples_x4(packed, reinterpret_cast<bc5::Block *>(dst) + output, img.format == Format::BC5_SNORM);
+                else
+                    bc6h::encode_samples_x4(packed, reinterpret_cast<bc6h::Block *>(dst) + output);
+            }
+            else if (img.format == Format::BC5_UNORM || img.format == Format::BC5_SNORM)
+                reinterpret_cast<bc5::Block *>(dst)[output] = bc5::encode_samples_scalar(samples[0], img.format == Format::BC5_SNORM);
+            else
+                reinterpret_cast<bc6h::Block *>(dst)[output] = bc6h::encode_samples_scalar(samples[0]);
+            bx += lanes;
+        }
+    }
+}
+
+static void generate_mip_level_bc2_bc3(Image &img, uint32_t level, const MeanImage4 &means,
+                                   uint32_t begin_row, uint32_t end_row, bool use_simd)
+{
+    const MipLevel &previous = img.mips[level - 1];
+    const MipLevel &current = img.mips[level];
+    const auto *src = img.data + previous.byte_offset;
+    auto *dst = img.data + current.byte_offset;
+    for (uint32_t by = begin_row; by < end_row; ++by)
+    {
+        for (uint32_t bx = 0; bx < current.block_count_x;)
+        {
+            const uint32_t height = std::min(4u, current.height - by * 4);
+            const bool vectorize = use_simd && height == 4 && bx * 4 + 16 <= current.width;
+            const uint32_t lanes = vectorize ? 4 : 1;
+            Float4 samples[4][16];
+            for (uint32_t lane = 0; lane < lanes; ++lane)
+            {
+                const uint32_t x = bx + lane;
+                const uint32_t width = std::min(4u, current.width - x * 4);
+                if (level >= 2)
+                {
+                    for (uint32_t i = 0; i < 16; ++i)
+                    {
+                        const uint32_t texel = bc1::texel_map[i];
+                        samples[lane][i] = means.get(x * 4 + (texel % 4) % width, by * 4 + (texel / 4) % height);
+                    }
+                    continue;
+                }
+                const uint32_t x0 = x * 2, y0 = by * 2;
+                for (uint32_t parent = 0; parent < 4; ++parent)
+                {
+                    const uint32_t sx = std::min(x0 + (parent & 1u), previous.block_count_x - 1);
+                    const uint32_t sy = std::min(y0 + (parent >> 1u), previous.block_count_y - 1);
+                    const uint8_t *block = src + (static_cast<size_t>(sy) * previous.block_count_x + sx) * 16;
+                    const uint32_t pw = std::min(4u, previous.width - sx * 4);
+                    const uint32_t ph = std::min(4u, previous.height - sy * 4);
+                    if (img.format == Format::BC2)
+                        bc2::get_quadrant_means(*reinterpret_cast<const bc2::Block *>(block), img.is_srgb, samples[lane] + parent * 4, pw, ph);
+                    else
+                        bc3::get_quadrant_means(*reinterpret_cast<const bc3::Block *>(block), img.is_srgb, samples[lane] + parent * 4, pw, ph);
+                }
+                Float4 original[16];
+                std::copy_n(samples[lane], 16, original);
+                for (uint32_t i = 0; i < 16; ++i)
+                {
+                    const uint32_t texel = bc1::texel_map[i];
+                    const uint32_t local = ((texel / 4) % height) * 4 + (texel % 4) % width;
+                    samples[lane][i] = original[bc1::texel_map[local]];
+                }
+                for (uint32_t parent = 0; parent < 4; ++parent)
+                {
+                    const Float4 *q = samples[lane] + parent * 4;
+                    means.set(x0 + (parent & 1u), y0 + (parent >> 1u), (q[0] + q[1] + q[2] + q[3]) * 0.25f);
+                }
+            }
+            const size_t output = static_cast<size_t>(by) * current.block_count_x + bx;
+            if (img.format == Format::BC2)
+            {
+                auto *blocks = reinterpret_cast<bc2::Block *>(dst) + output;
+                if (vectorize) bc2::encode_samples_x4(samples, img.is_srgb, blocks);
+                else *blocks = bc2::encode_samples_scalar(samples[0], img.is_srgb);
+            }
+            else
+            {
+                auto *blocks = reinterpret_cast<bc3::Block *>(dst) + output;
+                if (vectorize) bc3::encode_samples_x4(samples, img.is_srgb, blocks);
+                else *blocks = bc3::encode_samples_scalar(samples[0], img.is_srgb);
+            }
+            bx += lanes;
+        }
+    }
+}
+
 static void generate_mip_level_bc7(Image &img, uint32_t level, const MeanImage4 &means,
                                     uint32_t begin_row, uint32_t end_row, bool use_simd)
 {
@@ -238,7 +385,7 @@ static void generate_mip_level_bc7(Image &img, uint32_t level, const MeanImage4 
     }
 }
 
-static bool generate_mipmaps_bc7_cpu(Image &img, bool use_simd)
+static bool generate_mipmaps_rgba_cpu(Image &img, bool use_simd)
 {
     if (img.mip_count == 1)
     {
@@ -285,7 +432,10 @@ static bool generate_mipmaps_bc7_cpu(Image &img, bool use_simd)
         dispatcher.parallel_rows(current.block_count_y, blocks,
                                  [&](uint32_t begin, uint32_t end)
                                  {
-                                     generate_mip_level_bc7(img, level, means, begin, end, use_simd);
+                                     if (img.format == Format::BC2 || img.format == Format::BC3)
+                                         generate_mip_level_bc2_bc3(img, level, means, begin, end, use_simd);
+                                     else
+                                         generate_mip_level_bc7(img, level, means, begin, end, use_simd);
                                  });
     }
     return true;
@@ -303,10 +453,17 @@ bool generate_mipmaps_cpu(Image &img, bool use_simd)
         break;
 
     case Format::BC4_UNORM:
+    case Format::BC5_UNORM:
+    case Format::BC5_SNORM:
+    case Format::BC6H_UF16:
         break;
 
+    case Format::BC2:
+    case Format::BC3:
+        return generate_mipmaps_rgba_cpu(img, use_simd);
+
     case Format::BC7:
-        return img.is_srgb && generate_mipmaps_bc7_cpu(img, use_simd);
+        return img.is_srgb && generate_mipmaps_rgba_cpu(img, use_simd);
 
     default:
         return false;
@@ -375,6 +532,12 @@ bool generate_mipmaps_cpu(Image &img, bool use_simd)
 
                 case Format::BC4_UNORM:
                     generate_mip_level_bc4(img, level, means, begin, end, use_simd);
+                    break;
+
+                case Format::BC5_UNORM:
+                case Format::BC5_SNORM:
+                case Format::BC6H_UF16:
+                    generate_mip_level_bc5_bc6h(img, level, means, begin, end, use_simd);
                     break;
 
                 default:

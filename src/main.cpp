@@ -62,6 +62,11 @@ int main(int argc, char *argv[])
     case Format::BC1:
         break;
     case Format::BC4_UNORM:
+    case Format::BC5_UNORM:
+    case Format::BC5_SNORM:
+    case Format::BC2:
+    case Format::BC3:
+    case Format::BC6H_UF16:
         break;
 
     case Format::BC7:
@@ -74,7 +79,7 @@ int main(int argc, char *argv[])
         break;
 
     default:
-        std::cerr << "Mip generation supports BC1, BC4 UNORM, and BC7 UNORM SRGB" << std::endl;
+        std::cerr << "Mip generation supports BC1/2/3, BC4 UNORM, BC5 UNORM/SNORM, BC6H UF16, and BC7 UNORM SRGB" << std::endl;
         free_image(&image);
         return 1;
     }

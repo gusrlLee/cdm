@@ -2,6 +2,7 @@
 
 #include "bc4.h"
 #include "core/warp.cuh"
+#include "core/mipmap.h"
 
 #include <cuda_runtime.h>
 
@@ -189,5 +190,10 @@ namespace bc4
             }
         }
     }
+
+    void generate_base_mip_cuda(const Block *source, MipLevel source_level, Block *destination,
+                               MipLevel destination_level, MeanImage means, uint32_t groups, uint32_t threads);
+    void generate_mean_mip_cuda(MeanImage source, Block *destination, MipLevel destination_level,
+                               MeanImage next_means, uint32_t groups, uint32_t threads);
 
 } // namespace bc4

@@ -33,6 +33,23 @@ add_executable(
     src/codecs/bc4.h
     src/codecs/bc4_simd.h
     src/codecs/bc4_cuda.cuh
+    src/codecs/bc4_cuda.cu
+
+    src/codecs/bc2.h
+    src/codecs/bc2_simd.h
+    src/codecs/bc2_cuda.cuh
+
+    src/codecs/bc3.h
+    src/codecs/bc3_simd.h
+    src/codecs/bc3_cuda.cuh
+
+    src/codecs/bc5.h
+    src/codecs/bc5_simd.h
+    src/codecs/bc5_cuda.cuh
+
+    src/codecs/bc6h.h
+    src/codecs/bc6h_simd.h
+    src/codecs/bc6h_cuda.cuh
 
     src/codecs/bc7.h
     src/codecs/bc7_simd.h

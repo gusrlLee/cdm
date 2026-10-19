@@ -56,3 +56,52 @@ inline void downsample_means(const MeanImage& src, const MeanImage &dst, uint32_
         }
     }
 }
+
+// Keep alpha alongside the linear RGB means without changing the RGB path.
+struct MeanImage4
+{
+    float *r = nullptr;
+    float *g = nullptr;
+    float *b = nullptr;
+    float *a = nullptr;
+    uint32_t width = 0;
+    uint32_t height = 0;
+
+    CDM_INLINE Float4 get(uint32_t x, uint32_t y) const
+    {
+        x = x < width ? x : width - 1;
+        y = y < height ? y : height - 1;
+        const size_t index = static_cast<size_t>(y) * width + x;
+        return {r[index], g[index], b[index], a[index]};
+    }
+
+    CDM_INLINE void set(uint32_t x, uint32_t y, const Float4 &color) const
+    {
+        if (x >= width || y >= height)
+        {
+            return;
+        }
+
+        const size_t index = static_cast<size_t>(y) * width + x;
+        r[index] = color.r;
+        g[index] = color.g;
+        b[index] = color.b;
+        a[index] = color.a;
+    }
+};
+
+inline void downsample_means(const MeanImage4 &src, const MeanImage4 &dst, uint32_t begin_row, uint32_t end_row)
+{
+    for (uint32_t y = begin_row; y < end_row; ++y)
+    {
+        for (uint32_t x = 0; x < dst.width; ++x)
+        {
+            const Float4 ll = src.get(x * 2, y * 2);
+            const Float4 lr = src.get(x * 2 + 1, y * 2);
+            const Float4 rl = src.get(x * 2, y * 2 + 1);
+            const Float4 rr = src.get(x * 2 + 1, y * 2 + 1);
+            const Float4 mean = (ll + lr + rl + rr) * 0.25f;
+            dst.set(x, y, mean);
+        }
+    }
+}

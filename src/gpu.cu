@@ -8,6 +8,7 @@
 
 #include "codecs/bc1_cuda.cuh"
 #include "codecs/bc4_cuda.cuh"
+#include "codecs/bc7_cuda.cuh"
 
 #include <cuda_runtime.h>
 #include <array>
@@ -45,6 +46,16 @@ static bool initialize_color_tables()
     return true;
 }
 
+static bool initialize_bc7_tables()
+{
+    static bool initialized = false;
+    if (!initialized)
+    {
+        initialized = cuda_chk(bc7::upload_tables_cuda(), "Upload BC7 tables");
+    }
+    return initialized;
+}
+
 struct CudaWorkspace
 {
     DeviceBuffer<uint8_t> data;
@@ -62,8 +73,8 @@ struct CudaWorkspace
         const size_t base_count = static_cast<size_t>(bw) * bh;
         const size_t scratch_count = static_cast<size_t>(sw) * sh;
 
-        // Reserve three separate channels for linear RGB means.
-        return data.allocate(image.data_size) && base.allocate(base_count * 3) && scratch.allocate(scratch_count * 3);
+        const size_t channels = image.format == Format::BC7 ? 4 : 3;
+        return data.allocate(image.data_size) && base.allocate(base_count * channels) && scratch.allocate(scratch_count * channels);
     }
 };
 
@@ -266,9 +277,10 @@ static __global__ void generate_mean_mip_bc4(MeanImage source, bc4::Block *desti
 
 bool generate_mipmaps_cuda(Image &image)
 {
-    if (!image.data || image.mip_count == 0 || image.format != Format::BC1 && image.format != Format::BC4_UNORM)
+    if (!image.data || image.mip_count == 0 || image.format != Format::BC1 && image.format != Format::BC4_UNORM && image.format != Format::BC7)
         return false;
 
+    if (image.format == Format::BC7 && !image.is_srgb) return false;
     if (image.mip_count == 1)
         return true;
 
@@ -276,6 +288,8 @@ bool generate_mipmaps_cuda(Image &image)
 
     if (image.format == Format::BC1 && !initialize_color_tables())
         return false;
+
+    if (image.format == Format::BC7 && !initialize_bc7_tables()) return false;
 
     if (!workspace.prepare(image))
         return false;
@@ -297,6 +311,16 @@ bool generate_mipmaps_cuda(Image &image)
 
     MeanImage means = device_mean_view(workspace.base.get(), base_count, width, height);
     MeanImage scratch = device_mean_view(workspace.scratch.get(), scratch_count, 1, 1);
+
+    MeanImage4 means7{}, scratch7{};
+    if (image.format == Format::BC7)
+    {
+        float *base = workspace.base.get();
+        float *scratch_data = workspace.scratch.get();
+        means7 = {base, base + base_count, base + base_count * 2, base + base_count * 3, width, height};
+        scratch7 = {scratch_data, scratch_data + scratch_count, scratch_data + scratch_count * 2,
+                    scratch_data + scratch_count * 3, 1, 1};
+    }
 
     const uint32_t threads = 256;
     const uint32_t blocks_per_group = threads / 16;
@@ -326,6 +350,35 @@ bool generate_mipmaps_cuda(Image &image)
         const MipLevel &current = image.mips[level];
         const uint32_t block_count = current.block_count_x * current.block_count_y;
         const uint32_t groups = (block_count + blocks_per_group - 1) / blocks_per_group;
+
+        if (image.format == Format::BC7)
+        {
+            auto *destination = reinterpret_cast<bc7::Block *>(device_data + current.byte_offset);
+            if (level == 1)
+            {
+                const auto *source = reinterpret_cast<const bc7::Block *>(device_data + base_level.byte_offset);
+                bc7::generate_base_mip_cuda<<<groups, threads>>>(source, base_level, destination, current, means7);
+            }
+            else
+            {
+                MeanImage4 next{};
+                if (level + 1 < image.mip_count)
+                {
+                    scratch7.width = image.mips[level + 1].width;
+                    scratch7.height = image.mips[level + 1].height;
+                    next = scratch7;
+                }
+                bc7::generate_mean_mip_cuda<<<groups, threads>>>(means7, destination, current, next);
+                if (next.r != nullptr) std::swap(means7, scratch7);
+            }
+            if (!cuda_chk(cudaGetLastError(), "Launch BC7 mip kernel"))
+            {
+                cudaEventDestroy(end);
+                cudaEventDestroy(start);
+                return false;
+            }
+            continue;
+        }
 
         if (level == 1)
         {

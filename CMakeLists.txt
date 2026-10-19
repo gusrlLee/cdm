@@ -32,6 +32,12 @@ add_executable(
 
     src/codecs/bc4.h
     src/codecs/bc4_simd.h
+    src/codecs/bc4_cuda.cuh
+
+    src/codecs/bc7.h
+    src/codecs/bc7_simd.h
+    src/codecs/bc7_cuda.cuh
+    src/codecs/bc7_tables.h
 )
 
 target_include_directories(${PROJECT_NAME} PRIVATE 

@@ -64,8 +64,17 @@ int main(int argc, char *argv[])
     case Format::BC4_UNORM:
         break;
 
+    case Format::BC7:
+        if (!image.is_srgb)
+        {
+            std::cerr << "BC7 mip generation requires BC7_UNORM_SRGB" << std::endl;
+            free_image(&image);
+            return 1;
+        }
+        break;
+
     default:
-        std::cerr << "Mip generation supports only BC1 and BC4 UNORM" << std::endl;
+        std::cerr << "Mip generation supports BC1, BC4 UNORM, and BC7 UNORM SRGB" << std::endl;
         free_image(&image);
         return 1;
     }

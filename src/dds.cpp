@@ -4,6 +4,7 @@
 #include <algorithm>
 
 #pragma pack(push, 1)
+
 struct DdsPixelFormat
 {
     uint32_t size;
@@ -42,6 +43,7 @@ struct DdsHeaderDxt10
     uint32_t array_size;
     uint32_t misc_flags2;
 };
+
 #pragma pack(pop)
 
 constexpr uint32_t MakeFourCC(char c0, char c1, char c2, char c3)
@@ -257,14 +259,30 @@ bool save_dds(const char *filepath, const Image *image)
     case Format::BC1:
         dxgi_format = image->is_srgb ? 72 : 71;
         break;
-    case Format::BC2: dxgi_format = image->is_srgb ? 75 : 74; break;
-    case Format::BC3: dxgi_format = image->is_srgb ? 78 : 77; break;
-    case Format::BC4_UNORM: dxgi_format = 80; break;
-    case Format::BC4_SNORM: dxgi_format = 81; break;
-    case Format::BC5_UNORM: dxgi_format = 83; break;
-    case Format::BC5_SNORM: dxgi_format = 84; break;
-    case Format::BC6H_UF16: dxgi_format = 95; break;
-    case Format::BC7: dxgi_format = image->is_srgb ? 99 : 98; break;
+    case Format::BC2:
+        dxgi_format = image->is_srgb ? 75 : 74;
+        break;
+    case Format::BC3:
+        dxgi_format = image->is_srgb ? 78 : 77;
+        break;
+    case Format::BC4_UNORM:
+        dxgi_format = 80;
+        break;
+    case Format::BC4_SNORM:
+        dxgi_format = 81;
+        break;
+    case Format::BC5_UNORM:
+        dxgi_format = 83;
+        break;
+    case Format::BC5_SNORM:
+        dxgi_format = 84;
+        break;
+    case Format::BC6H_UF16:
+        dxgi_format = 95;
+        break;
+    case Format::BC7:
+        dxgi_format = image->is_srgb ? 99 : 98;
+        break;
     default:
         return false;
     }

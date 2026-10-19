@@ -78,10 +78,9 @@ CDM_INLINE float length_sq(const Float3 &value)
 // Multiply a symmetric matrix by a vector.
 CDM_INLINE Float3 multiply(const SymMat3 &matrix, const Float3 &value)
 {
-    return {
-        matrix.rr * value.r + matrix.rg * value.g + matrix.rb * value.b,
-        matrix.rg * value.r + matrix.gg * value.g + matrix.gb * value.b,
-        matrix.rb * value.r + matrix.gb * value.g + matrix.bb * value.b};
+    return {matrix.rr * value.r + matrix.rg * value.g + matrix.rb * value.b,
+            matrix.rg * value.r + matrix.gg * value.g + matrix.gb * value.b,
+            matrix.rb * value.r + matrix.gb * value.g + matrix.bb * value.b};
 }
 
 // Esitmate the color axis
@@ -217,17 +216,17 @@ CDM_INLINE float length_sq(const Float4 &value)
 CDM_INLINE Float4 compute_principal_axis(const SymMat4 &cov)
 {
     const float diagonal_sq = cov.rr * cov.rr + cov.gg * cov.gg + cov.bb * cov.bb + cov.aa * cov.aa;
-    const float off_diagonal_sq = cov.rg * cov.rg + cov.rb * cov.rb + cov.ra * cov.ra + cov.gb * cov.gb + cov.ga * cov.ga + cov.ba * cov.ba;
+    const float off_diagonal_sq =
+        cov.rg * cov.rg + cov.rb * cov.rb + cov.ra * cov.ra + cov.gb * cov.gb + cov.ga * cov.ga + cov.ba * cov.ba;
 
     const float matrix_norm_sq = diagonal_sq + 2.0f * off_diagonal_sq;
     const float threshold = matrix_norm_sq * 1e-6f;
 
     // Match src2 fallback directions when the diagonal covariance response vanishes.
-    constexpr Float4 seeds[4] = {
-        {0.5f, 0.5f, 0.5f, 0.5f},
-        {0.70710678f, -0.70710678f, 0.0f, 0.0f},
-        {0.0f, 0.70710678f, -0.70710678f, 0.0f},
-        {0.0f, 0.0f, 0.70710678f, -0.70710678f}};
+    constexpr Float4 seeds[4] = {{0.5f, 0.5f, 0.5f, 0.5f},
+                                 {0.70710678f, -0.70710678f, 0.0f, 0.0f},
+                                 {0.0f, 0.70710678f, -0.70710678f, 0.0f},
+                                 {0.0f, 0.0f, 0.70710678f, -0.70710678f}};
 
     for (const Float4 &seed : seeds)
     {

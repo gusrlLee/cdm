@@ -9,6 +9,7 @@ namespace bc5
         bc4::Block red;
         bc4::Block green;
     };
+
     static_assert(sizeof(Block) == 16 && offsetof(Block, green) == 8);
 
     CDM_INLINE int signed_endpoint(uint8_t byte)
@@ -54,7 +55,8 @@ namespace bc5
         return block;
     }
 
-    inline void get_quadrant_means(const Block &block, Float3 means[4], uint32_t width = 4, uint32_t height = 4, bool is_signed = false)
+    inline void get_quadrant_means(const Block &block, Float3 means[4], uint32_t width = 4, uint32_t height = 4,
+                                   bool is_signed = false)
     {
         float red[4], green[4];
         if (is_signed)

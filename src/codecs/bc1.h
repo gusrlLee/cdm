@@ -14,8 +14,7 @@ namespace bc1
     // Map quadrant-grouped samples to row-major texel positions.
     constexpr uint8_t texel_map[16] = {0, 1, 4, 5, 2, 3, 6, 7, 8, 9, 12, 13, 10, 11, 14, 15};
 
-    template <uint32_t MaxValue>
-    inline std::array<float, MaxValue> make_srgb_quantize_thresholds()
+    template <uint32_t MaxValue> inline std::array<float, MaxValue> make_srgb_quantize_thresholds()
     {
         constexpr uint32_t bits = MaxValue == 31 ? 5 : 6;
         std::array<float, MaxValue> thresholds{};
@@ -34,8 +33,7 @@ namespace bc1
     }
 
     // Quantize a linear channel using cached sRGB thresholds.
-    template <uint32_t MaxValue>
-    inline uint32_t quantize_linear_channel(float value)
+    template <uint32_t MaxValue> inline uint32_t quantize_linear_channel(float value)
     {
         static const std::array<float, MaxValue> thresholds = make_srgb_quantize_thresholds<MaxValue>();
         value = value < 0.0f ? 0.0f : (value > 1.0f ? 1.0f : value);
@@ -127,7 +125,8 @@ namespace bc1
         }
     }
 
-    inline Float3 sample_texel(const Block &block, const Float3 palette[4], uint32_t x, uint32_t y, uint32_t valid_width, uint32_t valid_height)
+    inline Float3 sample_texel(const Block &block, const Float3 palette[4], uint32_t x, uint32_t y,
+                               uint32_t valid_width, uint32_t valid_height)
     {
         // Repeat the last valid texel at image edges
         if (x >= valid_width)
@@ -160,7 +159,8 @@ namespace bc1
     }
 
     // Compute linear RGB means for the four 2x2 quadrants
-    inline void get_quadrant_means(const Block &block, bool is_srgb, Float3 means[4], uint32_t valid_width = 4, uint32_t valid_height = 4)
+    inline void get_quadrant_means(const Block &block, bool is_srgb, Float3 means[4], uint32_t valid_width = 4,
+                                   uint32_t valid_height = 4)
     {
         Float3 palette[4];
         get_palette(block, is_srgb, palette);
@@ -226,8 +226,8 @@ namespace bc1
         }
     }
 
-    // Quantize linear RGB and pack it into an RGB565 endpoint 
-    inline uint16_t encode_rgb565(const Float3& color, bool is_srgb)
+    // Quantize linear RGB and pack it into an RGB565 endpoint
+    inline uint16_t encode_rgb565(const Float3 &color, bool is_srgb)
     {
         const Float3 clamped = clamp01(color);
         uint32_t r, g, b;
@@ -258,14 +258,14 @@ namespace bc1
         const Float3 axis = compute_principal_axis(cov);
 
         float projections[16];
-        float minimum = 1e30f;  
+        float minimum = 1e30f;
         float maximum = -1e30f;
 
         for (uint32_t i = 0; i < 16; ++i)
         {
             const float projection = dot(samples[i] - mean, axis);
             projections[i] = projection;
-        
+
             minimum = std::min(minimum, projection);
             maximum = std::max(maximum, projection);
         }
@@ -278,7 +278,7 @@ namespace bc1
         block.c0 = encode_rgb565(p0, is_srgb);
         block.c1 = encode_rgb565(p1, is_srgb);
 
-        if (block.c0 < block.c1) 
+        if (block.c0 < block.c1)
         {
             std::swap(block.c0, block.c1);
         }
@@ -331,8 +331,8 @@ namespace bc1
 
         return std::min(4u, size - origin);
     }
-    
-    // Reuse the first parent when a second block is missing 
+
+    // Reuse the first parent when a second block is missing
     inline uint32_t parent_valid_extent(uint32_t size, uint32_t parent)
     {
         const uint32_t block = size > 4 ? parent : 0;
@@ -363,11 +363,9 @@ namespace bc1
         }
     }
 
-    inline Block generate_child_block_scalar(
-        const Block& p00, const Block& p10, const Block& p01, const Block& p11,
-        bool is_srgb, Float3 parent_means[4],
-        uint32_t valid_width, uint32_t valid_height,
-        uint32_t source_width, uint32_t source_height)
+    inline Block generate_child_block_scalar(const Block &p00, const Block &p10, const Block &p01, const Block &p11,
+                                             bool is_srgb, Float3 parent_means[4], uint32_t valid_width,
+                                             uint32_t valid_height, uint32_t source_width, uint32_t source_height)
     {
         const uint32_t left_width = parent_valid_extent(source_width, 0);
         const uint32_t right_width = parent_valid_extent(source_width, 1);
@@ -398,11 +396,8 @@ namespace bc1
     }
 
     // Encode a block from stored means without decoding BC1 again
-    inline Block generate_child_block_from_means_scalar(
-        const MeanImage &source, 
-        uint32_t block_x, uint32_t block_y,
-        bool is_srgb,
-        uint32_t valid_width, uint32_t valid_height)
+    inline Block generate_child_block_from_means_scalar(const MeanImage &source, uint32_t block_x, uint32_t block_y,
+                                                        bool is_srgb, uint32_t valid_width, uint32_t valid_height)
     {
         Float3 samples[16];
 
@@ -411,7 +406,7 @@ namespace bc1
             const uint32_t texel = texel_map[i];
             const uint32_t x = (texel & 3u) % valid_width;
             const uint32_t y = (texel >> 2) % valid_height;
-            
+
             samples[i] = source.get(block_x * 4 + x, block_y * 4 + y);
         }
 

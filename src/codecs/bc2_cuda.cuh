@@ -6,7 +6,7 @@
 namespace bc2
 {
     __device__ __forceinline__ Float3 device_rgb_quadrant_mean(const bc1::Block &block, uint32_t q, bool srgb,
-                                                             uint32_t width, uint32_t height)
+                                                               uint32_t width, uint32_t height)
     {
         uint32_t counts[4]{};
         for (uint32_t dy = 0; dy < 2; ++dy)
@@ -23,8 +23,8 @@ namespace bc2
         return mean;
     }
 
-    __device__ __forceinline__ Float4 device_quadrant_mean(const Block &block, uint32_t q, bool srgb,
-                                                         uint32_t width, uint32_t height)
+    __device__ __forceinline__ Float4 device_quadrant_mean(const Block &block, uint32_t q, bool srgb, uint32_t width,
+                                                           uint32_t height)
     {
         const Float3 rgb = device_rgb_quadrant_mean(block.rgb, q, srgb, width, height);
         return {rgb.r, rgb.g, rgb.b, alpha_quadrant_mean(block.alpha, q, width, height)};

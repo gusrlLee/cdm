@@ -39,10 +39,13 @@ namespace bc7
     CDM_INLINE uint8_t partition_anchor(uint32_t partition, uint32_t kind = 0)
     {
 #if defined(__CUDA_ARCH__)
-        return kind == 0 ? device_anchor2[partition] : kind == 1 ? device_anchor3a[partition] : device_anchor3b[partition];
+        return kind == 0   ? device_anchor2[partition]
+               : kind == 1 ? device_anchor3a[partition]
+                           : device_anchor3b[partition];
 #else
-        return kind == 0 ? g_bc7_table_anchor_index_second_subset[partition] :
-               kind == 1 ? g_bc7_table_anchor_index_third_subset_1[partition] : g_bc7_table_anchor_index_third_subset_2[partition];
+        return kind == 0   ? g_bc7_table_anchor_index_second_subset[partition]
+               : kind == 1 ? g_bc7_table_anchor_index_third_subset_1[partition]
+                           : g_bc7_table_anchor_index_third_subset_2[partition];
 #endif
     }
 
@@ -206,7 +209,8 @@ namespace bc7
                     {
                         for (uint32_t channel = 0; channel < channel_count; ++channel)
                         {
-                            out.endpoints[endpoint][channel] = static_cast<uint8_t>((out.endpoints[endpoint][channel] << 1) | pbit);
+                            out.endpoints[endpoint][channel] =
+                                static_cast<uint8_t>((out.endpoints[endpoint][channel] << 1) | pbit);
                         }
                     }
                 }
@@ -220,7 +224,8 @@ namespace bc7
 
                     for (uint32_t channel = 0; channel < channel_count; ++channel)
                     {
-                        out.endpoints[endpoint][channel] = static_cast<uint8_t>((out.endpoints[endpoint][channel] << 1) | pbit);
+                        out.endpoints[endpoint][channel] =
+                            static_cast<uint8_t>((out.endpoints[endpoint][channel] << 1) | pbit);
                     }
                 }
             }
@@ -240,7 +245,8 @@ namespace bc7
 
             if (alpha_bits != 0)
             {
-                const uint32_t value = static_cast<uint32_t>(out.endpoints[endpoint][3]) << (8 - alpha_endpoint_precision);
+                const uint32_t value = static_cast<uint32_t>(out.endpoints[endpoint][3])
+                                       << (8 - alpha_endpoint_precision);
                 out.endpoints[endpoint][3] = static_cast<uint8_t>(value | (value >> alpha_endpoint_precision));
             }
             else
@@ -350,15 +356,15 @@ namespace bc7
         constexpr uint8_t weights3[8] = {0, 9, 18, 27, 37, 46, 55, 64};
         constexpr uint8_t weights4[16] = {0, 4, 9, 13, 17, 21, 26, 30, 34, 38, 43, 47, 51, 55, 60, 64};
 #endif
-        const uint8_t *weights = index_bits == 2 ? weights2 : index_bits == 3 ? weights3
-                                                                              : weights4;
+        const uint8_t *weights = index_bits == 2 ? weights2 : index_bits == 3 ? weights3 : weights4;
         const uint32_t weight = weights[index];
 
         // BC7 uses integer weights and rounds before dividing by 64.
         return static_cast<uint8_t>(((64u - weight) * e0 + weight * e1 + 32u) >> 6);
     }
 
-    CDM_INLINE void reconstruct_color(const SymbolicBlock &block, uint32_t subset, uint32_t color_index, uint32_t alpha_index, uint8_t rgba[4])
+    CDM_INLINE void reconstruct_color(const SymbolicBlock &block, uint32_t subset, uint32_t color_index,
+                                      uint32_t alpha_index, uint8_t rgba[4])
     {
         assert(block.mode < 8);
         assert(subset < block.subset_count);
@@ -374,7 +380,8 @@ namespace bc7
 
         // Modes without a sperate alpha stream share the color index.
         const bool seperate_alpha = block.alpha_bits != 0;
-        rgba[3] = interpolate_channel(e0[3], e1[3], seperate_alpha ? alpha_index : color_index, seperate_alpha ? block.alpha_bits : block.color_bits);
+        rgba[3] = interpolate_channel(e0[3], e1[3], seperate_alpha ? alpha_index : color_index,
+                                      seperate_alpha ? block.alpha_bits : block.color_bits);
 
         if (block.rotation != 0)
         {
@@ -394,7 +401,8 @@ namespace bc7
         return {r, g, b, a};
     }
 
-    inline uint32_t build_quadrant_histogram(const SymbolicBlock &block, HistogramEntry entries[16], uint32_t valid_width = 4, uint32_t valid_height = 4)
+    inline uint32_t build_quadrant_histogram(const SymbolicBlock &block, HistogramEntry entries[16],
+                                             uint32_t valid_width = 4, uint32_t valid_height = 4)
     {
         assert(block.mode < 8);
         assert(valid_width >= 1 && valid_width <= 4);
@@ -412,7 +420,8 @@ namespace bc7
             const uint32_t sy = y < valid_height ? y : valid_height - 1;
             const uint32_t source = sy * 4 + sx;
 
-            const uint16_t key = static_cast<uint16_t>(block.subset[source] | (block.color_index[source] << 2) | (block.alpha_index[source] << 6));
+            const uint16_t key = static_cast<uint16_t>(block.subset[source] | (block.color_index[source] << 2) |
+                                                       (block.alpha_index[source] << 6));
             uint32_t entry = 0;
 
             while (entry < entry_count && entries[entry].key != key)
@@ -430,7 +439,8 @@ namespace bc7
         return entry_count;
     }
 
-    inline void get_quadrant_means(const Block &block, Float4 means[4], uint32_t valid_width = 4, uint32_t valid_height = 4)
+    inline void get_quadrant_means(const Block &block, Float4 means[4], uint32_t valid_width = 4,
+                                   uint32_t valid_height = 4)
     {
         for (uint32_t quadrant = 0; quadrant < 4; ++quadrant)
         {
@@ -525,8 +535,8 @@ namespace bc7
         return false;
     }
 
-    inline void compute_encoding_moments(const Float4 *samples, uint32_t count, bool has_alpha,
-                                         Float4 &mean, SymMat4 &covariance, Float4 &axis)
+    inline void compute_encoding_moments(const Float4 *samples, uint32_t count, bool has_alpha, Float4 &mean,
+                                         SymMat4 &covariance, Float4 &axis)
     {
         const float weight = 1.0f / static_cast<float>(count);
         if (!has_alpha)
@@ -550,9 +560,16 @@ namespace bc7
             axis = {rgb_axis.r, rgb_axis.g, rgb_axis.b, 0.0f};
 
             // Embed RGB statistics only to share the mode estimates and packing path.
-            covariance = {rgb_covariance.rr, rgb_covariance.rg, rgb_covariance.rb, 0.0f,
-                          rgb_covariance.gg, rgb_covariance.gb, 0.0f,
-                          rgb_covariance.bb, 0.0f, 0.0f};
+            covariance = {rgb_covariance.rr,
+                          rgb_covariance.rg,
+                          rgb_covariance.rb,
+                          0.0f,
+                          rgb_covariance.gg,
+                          rgb_covariance.gb,
+                          0.0f,
+                          rgb_covariance.bb,
+                          0.0f,
+                          0.0f};
             return;
         }
 
@@ -560,8 +577,7 @@ namespace bc7
         axis = compute_principal_axis(covariance);
     }
 
-    inline void project_samples(const Float4 *samples, uint32_t count,
-                                const Float4 &mean, const Float4 &axis,
+    inline void project_samples(const Float4 *samples, uint32_t count, const Float4 &mean, const Float4 &axis,
                                 float *projections, float &minimum, float &maximum)
     {
         minimum = 1e30f;
@@ -575,8 +591,8 @@ namespace bc7
         }
     }
 
-    inline void fit_endpoints_scalar(const Float4 samples[16], Float4 &low, Float4 &high,
-                                     Float4 &mean, Float4 &axis, float projections[16])
+    inline void fit_endpoints_scalar(const Float4 samples[16], Float4 &low, Float4 &high, Float4 &mean, Float4 &axis,
+                                     float projections[16])
     {
         SymMat4 covariance;
         compute_encoding_moments(samples, 16, has_alpha_samples(samples), mean, covariance, axis);
@@ -671,8 +687,7 @@ namespace bc7
         {
             const uint32_t previous = candidate - 1;
             const uint32_t previous_value = (previous << 1) | pbit;
-            const float previous_decoded = is_srgb ? c_srgb_to_linear[previous_value]
-                                                   : alpha_values[previous_value];
+            const float previous_decoded = is_srgb ? c_srgb_to_linear[previous_value] : alpha_values[previous_value];
             const float previous_difference = target - previous_decoded;
             const float previous_error = previous_difference * previous_difference;
 
@@ -688,8 +703,7 @@ namespace bc7
         {
             const uint32_t next = candidate + 1;
             const uint32_t next_value = (next << 1) | pbit;
-            const float next_decoded = is_srgb ? c_srgb_to_linear[next_value]
-                                               : alpha_values[next_value];
+            const float next_decoded = is_srgb ? c_srgb_to_linear[next_value] : alpha_values[next_value];
             const float next_difference = target - next_decoded;
             const float next_error = next_difference * next_difference;
 
@@ -702,7 +716,6 @@ namespace bc7
         return static_cast<uint8_t>(best);
 #endif
     }
-
 
 #if defined(_MSC_VER)
 #pragma float_control(pop)
@@ -718,8 +731,7 @@ namespace bc7
         // Alpha 255 requires P-bit 1 to preserve an opaque endpoint exactly.
         const uint32_t first_pbit = color.a == 1.0f ? 1u : 0u;
 
-        for (uint32_t candidate_pbit = first_pbit;
-             candidate_pbit < 2; ++candidate_pbit)
+        for (uint32_t candidate_pbit = first_pbit; candidate_pbit < 2; ++candidate_pbit)
         {
             uint8_t candidate[4];
             uint8_t reconstructed[4];
@@ -748,7 +760,6 @@ namespace bc7
             }
         }
     }
-
 
     CDM_INLINE void put_bits(Block &block, uint32_t &bit, uint32_t count, uint32_t value)
     {
@@ -780,7 +791,8 @@ namespace bc7
         return mask;
     }
 
-    static constexpr std::array<uint16_t, 64> kPartitionMasks2 = [] {
+    static constexpr std::array<uint16_t, 64> kPartitionMasks2 = []
+    {
         std::array<uint16_t, 64> masks{};
         for (uint32_t p = 0; p < 64; ++p)
         {
@@ -883,7 +895,8 @@ namespace bc7
         return sample_count * (residual > 0.0f ? residual : 0.0f);
     }
 
-    CDM_INLINE float estimate_rgb_index_sse(const Float4 &low, const Float4 &high, uint32_t sample_count, uint32_t index_levels)
+    CDM_INLINE float estimate_rgb_index_sse(const Float4 &low, const Float4 &high, uint32_t sample_count,
+                                            uint32_t index_levels)
     {
         const Float4 span = high - low;
         const float span_sq = span.r * span.r + span.g * span.g + span.b * span.b;
@@ -919,23 +932,21 @@ namespace bc7
 
     CDM_INLINE float estimate_mode6_sse(const SymMat4 &cov, const Float4 &axis, const Float4 &low, const Float4 &high)
     {
-        return estimate_rgb_line_sse(cov, axis, 16) + estimate_rgb_index_sse(low, high, 16, 16) + estimate_rgb_endpoint_sse(16, 128, 16);
+        return estimate_rgb_line_sse(cov, axis, 16) + estimate_rgb_index_sse(low, high, 16, 16) +
+               estimate_rgb_endpoint_sse(16, 128, 16);
     }
 
-    CDM_INLINE float estimate_rgba_sse(const SymMat4 &cov, const Float4 &axis,
-                                   const Float4 &low, const Float4 &high, uint32_t count,
-                                   uint32_t endpoint_levels, uint32_t index_levels)
+    CDM_INLINE float estimate_rgba_sse(const SymMat4 &cov, const Float4 &axis, const Float4 &low, const Float4 &high,
+                                       uint32_t count, uint32_t endpoint_levels, uint32_t index_levels)
     {
         const float residual = (cov.rr + cov.gg + cov.bb + cov.aa) - dot(axis, multiply(cov, axis));
         const float steps = float(index_levels - 1);
-        return float(count) * fmaxf(0.0f, residual) +
-               float(count) * length_sq(high - low) / (12.0f * steps * steps) +
+        return float(count) * fmaxf(0.0f, residual) + float(count) * length_sq(high - low) / (12.0f * steps * steps) +
                estimate_rgb_endpoint_sse(count, endpoint_levels, index_levels) * (4.0f / 3.0f);
     }
 
-    CDM_INLINE uint32_t choose_partitioned_mode(const PartitionSubsetStats stats[2], bool has_alpha,
-                                            const SymMat4 &cov, const Float4 &axis,
-                                            const Float4 &low, const Float4 &high)
+    CDM_INLINE uint32_t choose_partitioned_mode(const PartitionSubsetStats stats[2], bool has_alpha, const SymMat4 &cov,
+                                                const Float4 &axis, const Float4 &low, const Float4 &high)
     {
         if (!has_alpha)
         {
@@ -944,9 +955,9 @@ namespace bc7
         float error = 0.0f;
         for (uint32_t s = 0; s < 2; ++s)
         {
-            error += estimate_rgba_sse(stats[s].cov, stats[s].axis,
-                                      clamp01(stats[s].mean + stats[s].axis * stats[s].lo),
-                                      clamp01(stats[s].mean + stats[s].axis * stats[s].hi), stats[s].count, 32, 4);
+            error +=
+                estimate_rgba_sse(stats[s].cov, stats[s].axis, clamp01(stats[s].mean + stats[s].axis * stats[s].lo),
+                                  clamp01(stats[s].mean + stats[s].axis * stats[s].hi), stats[s].count, 32, 4);
         }
         return error < estimate_rgba_sse(cov, axis, low, high, 16, 128, 16) ? 7u : 6u;
     }
@@ -992,8 +1003,8 @@ namespace bc7
         return static_cast<uint8_t>(lower);
     }
 
-    CDM_INLINE void quantize_partition_endpoints(const Float4 endpoints[4], uint32_t mode,
-                                            uint8_t quantized[4][4], uint8_t pbits[4])
+    CDM_INLINE void quantize_partition_endpoints(const Float4 endpoints[4], uint32_t mode, uint8_t quantized[4][4],
+                                                 uint8_t pbits[4])
     {
         const uint32_t channels = mode == 1 ? 3 : 4;
         const uint32_t group_size = mode == 1 ? 2 : 1;
@@ -1035,8 +1046,8 @@ namespace bc7
         }
     }
 
-    inline void make_palette(uint32_t mode, const uint8_t quantized[4][4],
-                             const uint8_t pbits[4], Float4 palette[2][16])
+    inline void make_palette(uint32_t mode, const uint8_t quantized[4][4], const uint8_t pbits[4],
+                             Float4 palette[2][16])
     {
         const uint32_t subsets = mode == 6 ? 1 : 2;
         const uint32_t bits = mode == 6 ? 4 : (mode == 1 ? 3 : 2);
@@ -1075,14 +1086,12 @@ namespace bc7
                 palette[subset][index] = rgba8_to_linear(rgba);
             }
         }
-
     }
 
     // Choose indices by cached sample projections against the quantized palette.
     inline float assign_selectors(const Float4 samples[16], uint32_t mode, uint32_t partition,
-                                  const uint8_t quantized[4][4], const uint8_t pbits[4],
-                                  uint8_t selectors[16], const Float4 means[2], const Float4 axes[2],
-                                  const float sample_projections[16])
+                                  const uint8_t quantized[4][4], const uint8_t pbits[4], uint8_t selectors[16],
+                                  const Float4 means[2], const Float4 axes[2], const float sample_projections[16])
     {
         const uint32_t subsets = mode == 6 ? 1 : 2;
         const uint32_t palette_size = mode == 6 ? 16 : mode == 1 ? 8 : 4;
@@ -1120,8 +1129,8 @@ namespace bc7
         return total_error;
     }
 
-    CDM_INLINE void fix_anchors(uint32_t mode, uint32_t partition,
-                            uint8_t quantized[4][4], uint8_t pbits[4], uint8_t selectors[16])
+    CDM_INLINE void fix_anchors(uint32_t mode, uint32_t partition, uint8_t quantized[4][4], uint8_t pbits[4],
+                                uint8_t selectors[16])
     {
         const uint32_t subsets = mode == 6 ? 1 : 2;
         const uint32_t bits = mode == 6 ? 4 : (mode == 1 ? 3 : 2);
@@ -1153,9 +1162,8 @@ namespace bc7
         }
     }
 
-    CDM_INLINE Block pack_block(uint32_t mode, uint32_t partition,
-                            const uint8_t quantized[4][4], const uint8_t pbits[4],
-                            const uint8_t selectors[16])
+    CDM_INLINE Block pack_block(uint32_t mode, uint32_t partition, const uint8_t quantized[4][4],
+                                const uint8_t pbits[4], const uint8_t selectors[16])
     {
         assert(mode == 1 || mode == 6 || mode == 7);
         Block block{};
@@ -1182,8 +1190,7 @@ namespace bc7
         const uint32_t bits = mode == 6 ? 4 : (mode == 1 ? 3 : 2);
         for (uint32_t texel = 0; texel < 16; ++texel)
         {
-            const bool anchor = texel == 0 ||
-                (mode != 6 && texel == partition_anchor(partition));
+            const bool anchor = texel == 0 || (mode != 6 && texel == partition_anchor(partition));
             put_bits(block, bit, bits - anchor, selectors[texel]);
         }
         assert(bit == 128);
@@ -1192,8 +1199,8 @@ namespace bc7
 
     // Samples and selectors both use row-major texel order.
     inline Block encode_mode6_with_endpoints(const Float4 samples[16], const Float4 &low, const Float4 &high,
-                                             const Float4 &mean, const Float4 &axis,
-                                             const float sample_projections[16], float &error)
+                                             const Float4 &mean, const Float4 &axis, const float sample_projections[16],
+                                             float &error)
     {
         const Float4 means[2] = {mean, {}};
         const Float4 axes[2] = {axis, {}};
@@ -1216,9 +1223,9 @@ namespace bc7
         return encode_mode6_with_endpoints(samples, low, high, mean, axis, sample_projections, error);
     }
 
-    inline Block encode_partition_samples(const Float4 samples[16], uint32_t mode,
-                                          uint32_t partition, const PartitionSubsetStats stats[2],
-                                          const float sample_projections[16], float &error)
+    inline Block encode_partition_samples(const Float4 samples[16], uint32_t mode, uint32_t partition,
+                                          const PartitionSubsetStats stats[2], const float sample_projections[16],
+                                          float &error)
     {
         assert(mode == 1 || mode == 7);
         Float4 endpoints[4];
@@ -1234,14 +1241,14 @@ namespace bc7
         uint8_t pbits[4]{};
         uint8_t selectors[16];
         quantize_partition_endpoints(endpoints, mode, quantized, pbits);
-        error = assign_selectors(samples, mode, partition, quantized, pbits, selectors, means, axes, sample_projections);
+        error =
+            assign_selectors(samples, mode, partition, quantized, pbits, selectors, means, axes, sample_projections);
         fix_anchors(mode, partition, quantized, pbits, selectors);
         const Block block = pack_block(mode, partition, quantized, pbits, selectors);
         return block;
     }
 
-    inline Block encode_partition_samples(const Float4 samples[16], uint32_t mode,
-                                          uint32_t partition, float &error)
+    inline Block encode_partition_samples(const Float4 samples[16], uint32_t mode, uint32_t partition, float &error)
     {
         PartitionSubsetStats stats[2];
         float sample_projections[16];
@@ -1257,11 +1264,11 @@ namespace bc7
         SymMat4 covariance;
         compute_encoding_moments(samples, 16, has_alpha, mean, covariance, axis);
         const float variance = covariance.rr + covariance.gg + covariance.bb + covariance.aa;
-        
+
         float sample_projections[16];
         float minimum, maximum;
         project_samples(samples, 16, mean, axis, sample_projections, minimum, maximum);
-        
+
         Float4 low = mean;
         Float4 high = mean;
         float error;
@@ -1269,12 +1276,12 @@ namespace bc7
         {
             return encode_mode6_with_endpoints(samples, low, high, mean, axis, sample_projections, error);
         }
-        
+
         low = clamp01(mean + axis * minimum);
         high = clamp01(mean + axis * maximum);
 
         const uint32_t partition = choose_partition(desired_partition_mask(sample_projections));
-        
+
         PartitionSubsetStats stats[2];
         float subset_projections[16];
         compute_partition_subset_stats(samples, partition, stats, has_alpha, subset_projections);
@@ -1287,10 +1294,9 @@ namespace bc7
         return encode_partition_samples(samples, mode, partition, stats, subset_projections, error);
     }
 
-    inline void prepare_child_samples(
-        const Block &p00, const Block &p10, const Block &p01, const Block &p11,
-        Float4 parent_means[4], uint32_t valid_width, uint32_t valid_height,
-        uint32_t source_width, uint32_t source_height, Float4 samples[16])
+    inline void prepare_child_samples(const Block &p00, const Block &p10, const Block &p01, const Block &p11,
+                                      Float4 parent_means[4], uint32_t valid_width, uint32_t valid_height,
+                                      uint32_t source_width, uint32_t source_height, Float4 samples[16])
     {
         assert(valid_width >= 1 && valid_width <= 4);
         assert(valid_height >= 1 && valid_height <= 4);
@@ -1302,7 +1308,7 @@ namespace bc7
             const uint32_t py = source_height > 4 ? (parent / 2) * 4 : 0;
             const uint32_t width = source_width - px < 4 ? source_width - px : 4;
             const uint32_t height = source_height - py < 4 ? source_height - py : 4;
-            
+
             Float4 quadrants[4];
             get_quadrant_means(*parents[parent], quadrants, width, height);
             for (uint32_t quadrant = 0; quadrant < 4; ++quadrant)
@@ -1328,23 +1334,24 @@ namespace bc7
         for (uint32_t parent = 0; parent < 4; ++parent)
         {
             const uint32_t offset = (parent / 2) * 8 + (parent % 2) * 2;
-            const Float4 mean = (samples[offset] + samples[offset + 1] + samples[offset + 4] + samples[offset + 5]) * 0.25f;
+            const Float4 mean =
+                (samples[offset] + samples[offset + 1] + samples[offset + 4] + samples[offset + 5]) * 0.25f;
             parent_means[parent] = mean;
         }
     }
 
-    inline Block generate_child_block_scalar(
-        const Block &p00, const Block &p10, const Block &p01, const Block &p11,
-        Float4 parent_means[4], uint32_t valid_width, uint32_t valid_height,
-        uint32_t source_width, uint32_t source_height)
+    inline Block generate_child_block_scalar(const Block &p00, const Block &p10, const Block &p01, const Block &p11,
+                                             Float4 parent_means[4], uint32_t valid_width, uint32_t valid_height,
+                                             uint32_t source_width, uint32_t source_height)
     {
         Float4 samples[16];
-        prepare_child_samples(p00, p10, p01, p11, parent_means, valid_width, valid_height,
-                              source_width, source_height, samples);
+        prepare_child_samples(p00, p10, p01, p11, parent_means, valid_width, valid_height, source_width, source_height,
+                              samples);
         return encode_samples_scalar(samples);
     }
 
-    inline Block generate_child_block_from_means_scalar(const MeanImage4 &source, uint32_t block_x, uint32_t block_y, uint32_t valid_width, uint32_t valid_height)
+    inline Block generate_child_block_from_means_scalar(const MeanImage4 &source, uint32_t block_x, uint32_t block_y,
+                                                        uint32_t valid_width, uint32_t valid_height)
     {
         Float4 samples[16];
         for (uint32_t y = 0; y < 4; ++y)

@@ -4,7 +4,7 @@
 #include <cstdlib>
 #include <cstring>
 
-bool prepare_mip_chain(Image& image)
+bool prepare_mip_chain(Image &image)
 {
     if (!image.data || image.width == 0 || image.height == 0)
     {
@@ -14,8 +14,8 @@ bool prepare_mip_chain(Image& image)
     uint32_t width = image.width;
     uint32_t height = image.height;
     const size_t block_bytes = block_size(image.format);
-    
-    if (block_bytes == 0) 
+
+    if (block_bytes == 0)
     {
         return false;
     }
@@ -47,7 +47,7 @@ bool prepare_mip_chain(Image& image)
     if (image.mip_count >= count)
         return true;
 
-    uint8_t* data = static_cast<uint8_t*>(std::malloc(total_bytes));
+    uint8_t *data = static_cast<uint8_t *>(std::malloc(total_bytes));
     if (!data)
     {
         return false;

@@ -6,8 +6,8 @@
 namespace bc7
 {
     // Four RGBA channels accumulate together; opaque fitting still uses SymMat3.
-    inline void compute_encoding_moments_simd(const Float4 *samples, uint32_t count, bool has_alpha,
-                                              Float4 &mean, SymMat4 &covariance, Float4 &axis)
+    inline void compute_encoding_moments_simd(const Float4 *samples, uint32_t count, bool has_alpha, Float4 &mean,
+                                              SymMat4 &covariance, Float4 &axis)
     {
         __m128 sum = _mm_setzero_ps();
         for (uint32_t i = 0; i < count; ++i)
@@ -38,8 +38,8 @@ namespace bc7
         {
             _mm_store_ps(matrix[i], rows[i]);
         }
-        covariance = {matrix[0][0], matrix[0][1], matrix[0][2], matrix[0][3],
-                      matrix[1][1], matrix[1][2], matrix[1][3], matrix[2][2], matrix[2][3], matrix[3][3]};
+        covariance = {matrix[0][0], matrix[0][1], matrix[0][2], matrix[0][3], matrix[1][1],
+                      matrix[1][2], matrix[1][3], matrix[2][2], matrix[2][3], matrix[3][3]};
         if (has_alpha)
         {
             axis = compute_principal_axis(covariance);
@@ -54,8 +54,8 @@ namespace bc7
     }
 
     // Each SIMD lane projects one texel; tail subsets have fewer than four texels.
-    inline void project_samples_simd(const Float4 *samples, uint32_t count, const Float4 &mean,
-                                     const Float4 &axis, float *projections, float &minimum, float &maximum)
+    inline void project_samples_simd(const Float4 *samples, uint32_t count, const Float4 &mean, const Float4 &axis,
+                                     float *projections, float &minimum, float &maximum)
     {
         uint32_t i = 0;
         for (; i + 4 <= count; i += 4)
@@ -85,8 +85,8 @@ namespace bc7
     }
 
     inline void compute_partition_subset_stats_simd(const Float4 samples[16], uint32_t partition,
-                                                     PartitionSubsetStats stats[2], bool has_alpha,
-                                                     float sample_projections[16])
+                                                    PartitionSubsetStats stats[2], bool has_alpha,
+                                                    float sample_projections[16])
     {
         for (uint32_t subset = 0; subset < 2; ++subset)
         {
@@ -115,9 +115,9 @@ namespace bc7
     }
 
     template <uint32_t Mode>
-    inline void assign_selectors_simd(uint32_t partition,
-                                       const uint8_t quantized[4][4], const uint8_t pbits[4], uint8_t selectors[16],
-                                       const Float4 means[2], const Float4 axes[2], const float sample_projections[16])
+    inline void assign_selectors_simd(uint32_t partition, const uint8_t quantized[4][4], const uint8_t pbits[4],
+                                      uint8_t selectors[16], const Float4 means[2], const Float4 axes[2],
+                                      const float sample_projections[16])
     {
         constexpr uint32_t mode = Mode;
         const uint32_t subsets = mode == 6 ? 1 : 2;
@@ -220,19 +220,18 @@ namespace bc7
         return pack_block(mode, partition, quantized, pbits, selectors);
     }
 
-    inline Block generate_child_block_simd(
-        const Block &p00, const Block &p10, const Block &p01, const Block &p11,
-        Float4 parent_means[4], uint32_t valid_width, uint32_t valid_height,
-        uint32_t source_width, uint32_t source_height)
+    inline Block generate_child_block_simd(const Block &p00, const Block &p10, const Block &p01, const Block &p11,
+                                           Float4 parent_means[4], uint32_t valid_width, uint32_t valid_height,
+                                           uint32_t source_width, uint32_t source_height)
     {
         Float4 samples[16];
-        prepare_child_samples(p00, p10, p01, p11, parent_means, valid_width, valid_height,
-                              source_width, source_height, samples);
+        prepare_child_samples(p00, p10, p01, p11, parent_means, valid_width, valid_height, source_width, source_height,
+                              samples);
         return encode_samples_simd(samples);
     }
 
-    inline Block generate_child_block_from_means_simd(const MeanImage4 &source, uint32_t block_x,
-                                                      uint32_t block_y, uint32_t valid_width, uint32_t valid_height)
+    inline Block generate_child_block_from_means_simd(const MeanImage4 &source, uint32_t block_x, uint32_t block_y,
+                                                      uint32_t valid_width, uint32_t valid_height)
     {
         Float4 samples[16];
         for (uint32_t y = 0; y < 4; ++y)

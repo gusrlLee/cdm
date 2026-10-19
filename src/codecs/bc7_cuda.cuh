@@ -13,40 +13,50 @@ namespace bc7
         const auto lut = make_mode6_quantization_lut();
         cudaError_t result;
         result = cudaMemcpyToSymbol(g_srgb_to_linear, c_srgb_to_linear, sizeof(c_srgb_to_linear));
-        if (result != cudaSuccess) return result;
+        if (result != cudaSuccess)
+            return result;
         result = cudaMemcpyToSymbol(device_partition2, g_bc7_partition2, sizeof(g_bc7_partition2));
-        if (result != cudaSuccess) return result;
+        if (result != cudaSuccess)
+            return result;
         result = cudaMemcpyToSymbol(device_partition3, g_bc7_partition3, sizeof(g_bc7_partition3));
-        if (result != cudaSuccess) return result;
-        result = cudaMemcpyToSymbol(device_anchor2, g_bc7_table_anchor_index_second_subset, sizeof(g_bc7_table_anchor_index_second_subset));
-        if (result != cudaSuccess) return result;
-        result = cudaMemcpyToSymbol(device_anchor3a, g_bc7_table_anchor_index_third_subset_1, sizeof(g_bc7_table_anchor_index_third_subset_1));
-        if (result != cudaSuccess) return result;
-        result = cudaMemcpyToSymbol(device_anchor3b, g_bc7_table_anchor_index_third_subset_2, sizeof(g_bc7_table_anchor_index_third_subset_2));
-        if (result != cudaSuccess) return result;
+        if (result != cudaSuccess)
+            return result;
+        result = cudaMemcpyToSymbol(device_anchor2, g_bc7_table_anchor_index_second_subset,
+                                    sizeof(g_bc7_table_anchor_index_second_subset));
+        if (result != cudaSuccess)
+            return result;
+        result = cudaMemcpyToSymbol(device_anchor3a, g_bc7_table_anchor_index_third_subset_1,
+                                    sizeof(g_bc7_table_anchor_index_third_subset_1));
+        if (result != cudaSuccess)
+            return result;
+        result = cudaMemcpyToSymbol(device_anchor3b, g_bc7_table_anchor_index_third_subset_2,
+                                    sizeof(g_bc7_table_anchor_index_third_subset_2));
+        if (result != cudaSuccess)
+            return result;
         result = cudaMemcpyToSymbol(device_partition_masks, kPartitionMasks2.data(), sizeof(uint16_t) * 64);
-        if (result != cudaSuccess) return result;
+        if (result != cudaSuccess)
+            return result;
         result = cudaMemcpyToSymbol(device_mode6_lut, lut.data(), sizeof(uint8_t) * 4096);
-        if (result != cudaSuccess) return result;
+        if (result != cudaSuccess)
+            return result;
         return cudaSuccess;
     }
 
     __device__ __forceinline__ Float4 broadcast_color(Float4 value, unsigned mask)
     {
-        return {__shfl_sync(mask, value.r, 0, 16), __shfl_sync(mask, value.g, 0, 16),
-                __shfl_sync(mask, value.b, 0, 16), __shfl_sync(mask, value.a, 0, 16)};
+        return {__shfl_sync(mask, value.r, 0, 16), __shfl_sync(mask, value.g, 0, 16), __shfl_sync(mask, value.b, 0, 16),
+                __shfl_sync(mask, value.a, 0, 16)};
     }
 
     // One lane owns one row-major texel. Both subsets use the whole half-warp for reductions.
-    __device__ __forceinline__ PartitionSubsetStats device_subset_stats(
-        Float4 sample, bool included, bool has_alpha, unsigned mask, float &projection)
+    __device__ __forceinline__ PartitionSubsetStats device_subset_stats(Float4 sample, bool included, bool has_alpha,
+                                                                        unsigned mask, float &projection)
     {
         PartitionSubsetStats stats{};
         const float weight = included ? 1.0f : 0.0f;
         stats.count = static_cast<uint32_t>(sum16(weight, mask));
         const float inverse_count = 1.0f / static_cast<float>(stats.count);
-        stats.mean = {sum16(sample.r * weight, mask) * inverse_count,
-                      sum16(sample.g * weight, mask) * inverse_count,
+        stats.mean = {sum16(sample.r * weight, mask) * inverse_count, sum16(sample.g * weight, mask) * inverse_count,
                       sum16(sample.b * weight, mask) * inverse_count,
                       has_alpha ? sum16(sample.a * weight, mask) * inverse_count : 1.0f};
         const Float4 d = (sample - stats.mean) * weight;
@@ -86,11 +96,12 @@ namespace bc7
     }
 
     // Four-texel histogram avoids repeating reconstruction within one quadrant.
-    __device__ __forceinline__ Float4 device_quadrant_mean(
-        const Block &block, uint32_t quadrant, uint32_t width, uint32_t height)
+    __device__ __forceinline__ Float4 device_quadrant_mean(const Block &block, uint32_t quadrant, uint32_t width,
+                                                           uint32_t height)
     {
         const SymbolicBlock symbolic = parse_symbolic_block(block);
-        if (symbolic.mode == 8) return {};
+        if (symbolic.mode == 8)
+            return {};
         uint16_t keys[4]{};
         uint8_t counts[4]{};
         uint32_t entries = 0;
@@ -101,11 +112,13 @@ namespace bc7
                 const uint32_t sx = min((quadrant & 1u) * 2 + x, width - 1);
                 const uint32_t sy = min((quadrant >> 1u) * 2 + y, height - 1);
                 const uint32_t t = sy * 4 + sx;
-                const uint16_t key = symbolic.subset[t] | (symbolic.color_index[t] << 2) |
-                                     (symbolic.alpha_index[t] << 6);
+                const uint16_t key =
+                    symbolic.subset[t] | (symbolic.color_index[t] << 2) | (symbolic.alpha_index[t] << 6);
                 uint32_t entry = 0;
-                while (entry < entries && keys[entry] != key) ++entry;
-                if (entry == entries) keys[entries++] = key;
+                while (entry < entries && keys[entry] != key)
+                    ++entry;
+                if (entry == entries)
+                    keys[entries++] = key;
                 ++counts[entry];
             }
         }
@@ -146,7 +159,8 @@ namespace bc7
         if (!flat)
         {
             const uint16_t desired = static_cast<uint16_t>(or16(uint32_t(projection > 0.0f) << lane, mask));
-            if (lane == 0) partition = choose_partition(desired);
+            if (lane == 0)
+                partition = choose_partition(desired);
             partition = __shfl_sync(mask, partition, 0, 16);
             const uint32_t subset = partition_subset(partition, lane);
             for (uint32_t s = 0; s < 2; ++s)
@@ -186,8 +200,9 @@ namespace bc7
             {
                 for (uint32_t c = 0; c < 4; ++c)
                 {
-                    endpoints[e][c] = mode == 6 ? (quantized[e][c] << 1) | pbits[e] :
-                                      mode == 1 && c == 3 ? 255 : expand_partition_channel(quantized[e][c], pbits[e], mode);
+                    endpoints[e][c] = mode == 6             ? (quantized[e][c] << 1) | pbits[e]
+                                      : mode == 1 && c == 3 ? 255
+                                                            : expand_partition_channel(quantized[e][c], pbits[e], mode);
                 }
             }
         }
@@ -231,7 +246,8 @@ namespace bc7
         for (uint32_t i = 0; i < 16; ++i)
         {
             const uint32_t selected = __shfl_sync(mask, selector, i, 16);
-            if (lane == 0) selectors[i] = static_cast<uint8_t>(selected);
+            if (lane == 0)
+                selectors[i] = static_cast<uint8_t>(selected);
         }
         if (lane == 0)
         {
@@ -260,11 +276,12 @@ namespace bc7
         return (values[0] + values[1] + values[2] + values[3]) * 0.25f;
     }
 
-    static __global__ void generate_base_mip_cuda(const Block *source, MipLevel previous,
-                                                 Block *destination, MipLevel current, MeanImage4 means)
+    static __global__ void generate_base_mip_cuda(const Block *source, MipLevel previous, Block *destination,
+                                                  MipLevel current, MeanImage4 means)
     {
         const uint32_t output = blockIdx.x * (blockDim.x / 16) + threadIdx.x / 16;
-        if (output >= current.block_count_x * current.block_count_y) return;
+        if (output >= current.block_count_x * current.block_count_y)
+            return;
         const uint32_t lane = threadIdx.x & 15u;
         const uint32_t x = lane % 4;
         const uint32_t y = lane / 4;
@@ -285,11 +302,12 @@ namespace bc7
         encode_half_warp(sample, destination + output);
     }
 
-    static __global__ void generate_mean_mip_cuda(MeanImage4 source, Block *destination,
-                                                 MipLevel current, MeanImage4 next)
+    static __global__ void generate_mean_mip_cuda(MeanImage4 source, Block *destination, MipLevel current,
+                                                  MeanImage4 next)
     {
         const uint32_t output = blockIdx.x * (blockDim.x / 16) + threadIdx.x / 16;
-        if (output >= current.block_count_x * current.block_count_y) return;
+        if (output >= current.block_count_x * current.block_count_y)
+            return;
         const uint32_t lane = threadIdx.x & 15u;
         const uint32_t x = lane % 4;
         const uint32_t y = lane / 4;

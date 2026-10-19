@@ -15,7 +15,9 @@ enum class Backend
 
 uint64_t GetTime()
 {
-    return std::chrono::time_point_cast<std::chrono::microseconds>(std::chrono::high_resolution_clock::now()).time_since_epoch().count();
+    return std::chrono::time_point_cast<std::chrono::microseconds>(std::chrono::high_resolution_clock::now())
+        .time_since_epoch()
+        .count();
 }
 
 int main(int argc, char *argv[])
@@ -79,7 +81,8 @@ int main(int argc, char *argv[])
         break;
 
     default:
-        std::cerr << "Mip generation supports BC1/2/3, BC4 UNORM, BC5 UNORM/SNORM, BC6H UF16, and BC7 UNORM SRGB" << std::endl;
+        std::cerr << "Mip generation supports BC1/2/3, BC4 UNORM, BC5 UNORM/SNORM, BC6H UF16, and BC7 UNORM SRGB"
+                  << std::endl;
         free_image(&image);
         return 1;
     }

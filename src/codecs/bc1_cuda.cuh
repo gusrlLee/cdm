@@ -7,13 +7,16 @@
 namespace bc1
 {
     // Decode one palette color to linear RGB.
-    __device__ __forceinline__ Float3 device_palette_color(uint16_t c0, uint16_t c1, uint32_t selector, bool is_srgb, bool opaque = false)
+    __device__ __forceinline__ Float3 device_palette_color(uint16_t c0, uint16_t c1, uint32_t selector, bool is_srgb,
+                                                           bool opaque = false)
     {
         const Rgb8 color = palette_color_rgb8(c0, c1, selector, opaque);
-        return {decode_channel_cuda(color.r, is_srgb), decode_channel_cuda(color.g, is_srgb), decode_channel_cuda(color.b, is_srgb)};
+        return {decode_channel_cuda(color.r, is_srgb), decode_channel_cuda(color.g, is_srgb),
+                decode_channel_cuda(color.b, is_srgb)};
     }
 
-    __device__ __forceinline__ Float3 device_quadrant_mean(const Block &block, uint32_t quadrant, bool is_srgb, uint32_t valid_width = 4, uint32_t valid_height = 4)
+    __device__ __forceinline__ Float3 device_quadrant_mean(const Block &block, uint32_t quadrant, bool is_srgb,
+                                                           uint32_t valid_width = 4, uint32_t valid_height = 4)
     {
         const unsigned mask = half_warp_mask();
         const uint32_t group_start = (threadIdx.x & 15u) & ~3u;
@@ -47,7 +50,8 @@ namespace bc1
         for (uint32_t selector = 0; selector < 4; ++selector)
         {
             const uint32_t lane = group_start + selector;
-            const Float3 color = {__shfl_sync(mask, owned.r, lane, 16), __shfl_sync(mask, owned.g, lane, 16), __shfl_sync(mask, owned.b, lane, 16)};
+            const Float3 color = {__shfl_sync(mask, owned.r, lane, 16), __shfl_sync(mask, owned.g, lane, 16),
+                                  __shfl_sync(mask, owned.b, lane, 16)};
             const uint32_t packed = __shfl_sync(mask, counts, lane, 16);
             const uint32_t count = (packed >> shift) & 15u;
 
@@ -58,8 +62,7 @@ namespace bc1
     }
 
     // Match the CPU upper-bound search for sRGB quantization.
-    template <uint32_t MaxValue>
-    __device__ __forceinline__ uint32_t device_quantize_channel(float value)
+    template <uint32_t MaxValue> __device__ __forceinline__ uint32_t device_quantize_channel(float value)
     {
         const float *thresholds = MaxValue == 31 ? g_threshold31 : g_threshold63;
 
@@ -149,7 +152,8 @@ namespace bc1
         // Strict comparison keeps the lower selector on ties.
         for (uint32_t selector = 0; selector < 4; ++selector)
         {
-            const Float3 color = device_palette_color(static_cast<uint16_t>(c0), static_cast<uint16_t>(c1), selector, is_srgb, true);
+            const Float3 color =
+                device_palette_color(static_cast<uint16_t>(c0), static_cast<uint16_t>(c1), selector, is_srgb, true);
 
             const float palette_projection = dot(color - mean, axis);
             const float delta = projection - palette_projection;
@@ -177,7 +181,8 @@ namespace bc1
     }
 
     // Repeat valid samples to fill a partial 4x4 block
-    __device__ __forceinline__ Float3 repeat_small_sample(const Float3 &sample, uint32_t valid_width, uint32_t valid_height)
+    __device__ __forceinline__ Float3 repeat_small_sample(const Float3 &sample, uint32_t valid_width,
+                                                          uint32_t valid_height)
     {
         const unsigned mask = half_warp_mask();
         const uint32_t lane = threadIdx.x & 15u;
@@ -189,8 +194,10 @@ namespace bc1
         const uint32_t source_y = y % valid_height;
 
         // Convert texel coordinates back to a quadrant-grouped lane.
-        const uint32_t source_lane = (source_x & 1u) | ((source_y & 1u) << 1u) | ((source_x & 2u) << 1u) | ((source_y & 2u) << 2u);
-        return {__shfl_sync(mask, sample.r, source_lane, 16), __shfl_sync(mask, sample.g, source_lane, 16), __shfl_sync(mask, sample.b, source_lane, 16)};
+        const uint32_t source_lane =
+            (source_x & 1u) | ((source_y & 1u) << 1u) | ((source_x & 2u) << 1u) | ((source_y & 2u) << 2u);
+        return {__shfl_sync(mask, sample.r, source_lane, 16), __shfl_sync(mask, sample.g, source_lane, 16),
+                __shfl_sync(mask, sample.b, source_lane, 16)};
     }
 
 } // namespace bc1

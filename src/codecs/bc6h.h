@@ -46,6 +46,7 @@ namespace bc6h
         uint64_t low;
         uint64_t high;
     };
+
     static_assert(sizeof(Block) == 16);
 
     CDM_INLINE int weight4(uint32_t index)
@@ -93,12 +94,14 @@ namespace bc6h
         unsigned short h = (unsigned short)((const unsigned char *)s)[1];
         return l | (h << 8);
     }
+
     CDM_INLINE uint32_t get_u32le(const void *s)
     {
         unsigned int l = get_u16le(s);
         unsigned int h = get_u16le((const unsigned char *)s + 2);
         return l | (h << 16);
     }
+
     CDM_INLINE uint64_t get_u64le(const void *s)
     {
         unsigned long long l = get_u32le(s);
@@ -145,6 +148,7 @@ namespace bc6h
         }
         return result;
     }
+
     /* http://graphics.stanford.edu/~seander/bithacks.html#VariableSignExtend */
     CDM_INLINE int extend_sign(int val, int bits)
     {
@@ -253,7 +257,8 @@ namespace bc6h
     /* modified half_to_float_fast4 from https://gist.github.com/rygorous/2144712 */
     CDM_INLINE float half_to_float(uint16_t half)
     {
-        typedef union {
+        typedef union
+        {
             unsigned int u;
             float f;
         } FP32;
@@ -369,7 +374,8 @@ namespace bc6h
         switch (mode)
         {
         /* mode 1 */
-        case 0b00: {
+        case 0b00:
+        {
             /* Partitition indices: 46 bits
                Partition: 5 bits
                Color Endpoints: 75 bits (10.555, 10.555, 10.555) */
@@ -398,7 +404,8 @@ namespace bc6h
         break;
 
         /* mode 2 */
-        case 0b01: {
+        case 0b01:
+        {
             /* Partitition indices: 46 bits
                Partition: 5 bits
                Color Endpoints: 75 bits (7666, 7666, 7666) */
@@ -431,7 +438,8 @@ namespace bc6h
         break;
 
         /* mode 3 */
-        case 0b00010: {
+        case 0b00010:
+        {
             /* Partitition indices: 46 bits
                Partition: 5 bits
                Color Endpoints: 72 bits (11.555, 11.444, 11.444) */
@@ -459,7 +467,8 @@ namespace bc6h
         break;
 
         /* mode 4 */
-        case 0b00110: {
+        case 0b00110:
+        {
             /* Partitition indices: 46 bits
                Partition: 5 bits
                Color Endpoints: 72 bits (11.444, 11.555, 11.444) */
@@ -489,7 +498,8 @@ namespace bc6h
         break;
 
         /* mode 5 */
-        case 0b01010: {
+        case 0b01010:
+        {
             /* Partitition indices: 46 bits
                Partition: 5 bits
                Color Endpoints: 72 bits (11.444, 11.444, 11.555) */
@@ -519,7 +529,8 @@ namespace bc6h
         break;
 
         /* mode 6 */
-        case 0b01110: {
+        case 0b01110:
+        {
             /* Partitition indices: 46 bits
                Partition: 5 bits
                Color Endpoints: 72 bits (9555, 9555, 9555) */
@@ -548,7 +559,8 @@ namespace bc6h
         break;
 
         /* mode 7 */
-        case 0b10010: {
+        case 0b10010:
+        {
             /* Partitition indices: 46 bits
                Partition: 5 bits
                Color Endpoints: 72 bits (8666, 8555, 8555) */
@@ -577,7 +589,8 @@ namespace bc6h
         break;
 
         /* mode 8 */
-        case 0b10110: {
+        case 0b10110:
+        {
             /* Partitition indices: 46 bits
                Partition: 5 bits
                Color Endpoints: 72 bits (8555, 8666, 8555) */
@@ -608,7 +621,8 @@ namespace bc6h
         break;
 
         /* mode 9 */
-        case 0b11010: {
+        case 0b11010:
+        {
             /* Partitition indices: 46 bits
                Partition: 5 bits
                Color Endpoints: 72 bits (8555, 8555, 8666) */
@@ -639,7 +653,8 @@ namespace bc6h
         break;
 
         /* mode 10 */
-        case 0b11110: {
+        case 0b11110:
+        {
             /* Partitition indices: 46 bits
                Partition: 5 bits
                Color Endpoints: 72 bits (6666, 6666, 6666) */
@@ -672,7 +687,8 @@ namespace bc6h
         break;
 
         /* mode 11 */
-        case 0b00011: {
+        case 0b00011:
+        {
             /* Partitition indices: 63 bits
                Partition: 0 bits
                Color Endpoints: 60 bits (10.10, 10.10, 10.10) */
@@ -687,7 +703,8 @@ namespace bc6h
         break;
 
         /* mode 12 */
-        case 0b00111: {
+        case 0b00111:
+        {
             /* Partitition indices: 63 bits
                Partition: 0 bits
                Color Endpoints: 60 bits (11.9, 11.9, 11.9) */
@@ -705,7 +722,8 @@ namespace bc6h
         break;
 
         /* mode 13 */
-        case 0b01011: {
+        case 0b01011:
+        {
             /* Partitition indices: 63 bits
                Partition: 0 bits
                Color Endpoints: 60 bits (12.8, 12.8, 12.8) */
@@ -723,7 +741,8 @@ namespace bc6h
         break;
 
         /* mode 14 */
-        case 0b01111: {
+        case 0b01111:
+        {
             /* Partitition indices: 63 bits
                Partition: 0 bits
                Color Endpoints: 60 bits (16.4, 16.4, 16.4) */
@@ -740,7 +759,8 @@ namespace bc6h
         }
         break;
 
-        default: {
+        default:
+        {
             /* Modes 10011, 10111, 11011, and 11111 (not shown) are reserved.
                Do not use these in your encoder. If the hardware is passed blocks
                with one of these modes specified, the resulting decompressed block
@@ -854,7 +874,8 @@ namespace bc6h
         }
     }
 
-    CDM_INLINE void decode_half(const void *compressedBlock, void *decompressedBlock, int destinationPitch, int isSigned)
+    CDM_INLINE void decode_half(const void *compressedBlock, void *decompressedBlock, int destinationPitch,
+                                int isSigned)
     {
         parse_or_decode_half(compressedBlock, decompressedBlock, destinationPitch, isSigned, nullptr);
     }
@@ -868,10 +889,12 @@ namespace bc6h
 
     CDM_INLINE uint16_t float_to_half(float value)
     {
-        union {
+        union
+        {
             float f;
             uint32_t u;
         } in = {value};
+
         uint32_t sign = (in.u >> 16) & 0x8000u;
         uint32_t magnitude = in.u & 0x7fffffffu;
         if (magnitude >= 0x477fe000u)
@@ -902,8 +925,8 @@ namespace bc6h
     CDM_INLINE float sanitize_hdr(float value);
     CDM_INLINE Float3 sanitize_hdr(const Float3 &value);
 
-    CDM_INLINE void get_quadrant_means(const bc6h::Block &block, Float3 out[4],
-                                       uint32_t valid_width = 4, uint32_t valid_height = 4)
+    CDM_INLINE void get_quadrant_means(const bc6h::Block &block, Float3 out[4], uint32_t valid_width = 4,
+                                       uint32_t valid_height = 4)
     {
         const SymbolicBC6H symbolic = parse_symbolic_block(block);
         for (uint32_t quadrant = 0; quadrant < 4; ++quadrant)
@@ -916,6 +939,7 @@ namespace bc6h
             uint8_t key;
             uint16_t quadrant_counts;
         } histogram[16];
+
         uint32_t entry_count = 0;
         for (uint32_t texel = 0; texel < 16; ++texel)
         {
@@ -939,10 +963,9 @@ namespace bc6h
             const uint32_t selector = histogram[entry].key >> 1;
             const int *a = symbolic.endpoints[subset * 2];
             const int *b = symbolic.endpoints[subset * 2 + 1];
-            Float3 value = {
-                half_to_float(finish_unquantize(interpolate(a[0], b[0], weights, selector), 0)),
-                half_to_float(finish_unquantize(interpolate(a[1], b[1], weights, selector), 0)),
-                half_to_float(finish_unquantize(interpolate(a[2], b[2], weights, selector), 0))};
+            Float3 value = {half_to_float(finish_unquantize(interpolate(a[0], b[0], weights, selector), 0)),
+                            half_to_float(finish_unquantize(interpolate(a[1], b[1], weights, selector), 0)),
+                            half_to_float(finish_unquantize(interpolate(a[2], b[2], weights, selector), 0))};
             value = sanitize_hdr(value);
             for (uint32_t quadrant = 0; quadrant < 4; ++quadrant)
                 out[quadrant] += value * (float((histogram[entry].quadrant_counts >> (quadrant * 3)) & 7) * 0.25f);
@@ -966,7 +989,12 @@ namespace bc6h
 
     CDM_INLINE float sanitize_hdr(float value)
     {
-        union { float f; uint32_t bits; } input = {value};
+        union
+        {
+            float f;
+            uint32_t bits;
+        } input = {value};
+
         if ((input.bits & 0x7f800000u) == 0x7f800000u)
             return 0.0f;
         return value < 0.0f ? 0.0f : (value > 65504.0f ? 65504.0f : value);

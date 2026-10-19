@@ -1,7 +1,8 @@
 #include "bc4_cuda.cuh"
 
 // Keep BC4's first kernel load independent of the larger HDR/RGBA module.
-static __global__ void generate_base_mip_bc4(const bc4::Block *source, MipLevel source_level, bc4::Block *destination, MipLevel destination_level, MeanImage means)
+static __global__ void generate_base_mip_bc4(const bc4::Block *source, MipLevel source_level, bc4::Block *destination,
+                                             MipLevel destination_level, MeanImage means)
 {
     const uint32_t output = blockIdx.x * (blockDim.x / 16) + threadIdx.x / 16;
     const uint32_t output_count = destination_level.block_count_x * destination_level.block_count_y;
@@ -46,7 +47,8 @@ static __global__ void generate_base_mip_bc4(const bc4::Block *source, MipLevel 
 
     const float parent_mean = sum4(sample, mask) * 0.25f;
 
-    const bool unique_parent = parent == 0 || (parent == 1 && x1 != x0) || (parent == 2 && y1 != y0) || (parent == 3 && x1 != x0 && y1 != y0);
+    const bool unique_parent =
+        parent == 0 || (parent == 1 && x1 != x0) || (parent == 2 && y1 != y0) || (parent == 3 && x1 != x0 && y1 != y0);
 
     if (quadrant == 0 && unique_parent)
         means.set(sx, sy, {parent_mean, 0.0f, 0.0f});
@@ -54,7 +56,8 @@ static __global__ void generate_base_mip_bc4(const bc4::Block *source, MipLevel 
     bc4::encode_half_warp(sample, destination + output);
 }
 
-static __global__ void generate_mean_mip_bc4(MeanImage source, bc4::Block *destination, MipLevel destination_level, MeanImage next_means)
+static __global__ void generate_mean_mip_bc4(MeanImage source, bc4::Block *destination, MipLevel destination_level,
+                                             MeanImage next_means)
 {
     const uint32_t output = blockIdx.x * (blockDim.x / 16) + threadIdx.x / 16;
     const uint32_t output_count = destination_level.block_count_x * destination_level.block_count_y;
@@ -97,13 +100,13 @@ static __global__ void generate_mean_mip_bc4(MeanImage source, bc4::Block *desti
 namespace bc4
 {
     void generate_base_mip_cuda(const Block *source, MipLevel source_level, Block *destination,
-                               MipLevel destination_level, MeanImage means, uint32_t groups, uint32_t threads)
+                                MipLevel destination_level, MeanImage means, uint32_t groups, uint32_t threads)
     {
         generate_base_mip_bc4<<<groups, threads>>>(source, source_level, destination, destination_level, means);
     }
 
-    void generate_mean_mip_cuda(MeanImage source, Block *destination, MipLevel destination_level,
-                               MeanImage next_means, uint32_t groups, uint32_t threads)
+    void generate_mean_mip_cuda(MeanImage source, Block *destination, MipLevel destination_level, MeanImage next_means,
+                                uint32_t groups, uint32_t threads)
     {
         generate_mean_mip_bc4<<<groups, threads>>>(source, destination, destination_level, next_means);
     }

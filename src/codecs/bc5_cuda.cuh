@@ -5,7 +5,8 @@
 
 namespace bc5
 {
-    __device__ __forceinline__ float device_signed_quadrant_mean(const bc4::Block &block, uint32_t q, uint32_t width, uint32_t height)
+    __device__ __forceinline__ float device_signed_quadrant_mean(const bc4::Block &block, uint32_t q, uint32_t width,
+                                                                 uint32_t height)
     {
         uint32_t counts[8]{};
         for (uint32_t dy = 0; dy < 2; ++dy)
@@ -46,7 +47,7 @@ namespace bc5
     }
 
     __device__ __forceinline__ Float3 device_quadrant_mean(const Block &block, uint32_t quadrant, bool is_signed,
-                                                         uint32_t width, uint32_t height)
+                                                           uint32_t width, uint32_t height)
     {
         if (is_signed)
             return {device_signed_quadrant_mean(block.red, quadrant, width, height),

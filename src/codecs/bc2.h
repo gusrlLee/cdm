@@ -9,6 +9,7 @@ namespace bc2
         uint64_t alpha;
         bc1::Block rgb;
     };
+
     static_assert(sizeof(Block) == 16 && offsetof(Block, rgb) == 8);
 
     CDM_INLINE uint32_t quantize_alpha(float alpha)
@@ -32,7 +33,8 @@ namespace bc2
     }
 
     // BC2 and BC3 always use the four-color RGB palette, regardless of endpoint order.
-    inline void get_rgb_quadrant_means(const bc1::Block &block, bool srgb, Float3 means[4], uint32_t width, uint32_t height)
+    inline void get_rgb_quadrant_means(const bc1::Block &block, bool srgb, Float3 means[4], uint32_t width,
+                                       uint32_t height)
     {
         Float3 palette[4];
         bc1::get_palette(block, srgb, palette, true);
@@ -52,7 +54,8 @@ namespace bc2
         }
     }
 
-    inline void get_quadrant_means(const Block &block, bool srgb, Float4 means[4], uint32_t width = 4, uint32_t height = 4)
+    inline void get_quadrant_means(const Block &block, bool srgb, Float4 means[4], uint32_t width = 4,
+                                   uint32_t height = 4)
     {
         Float3 rgb[4];
         get_rgb_quadrant_means(block.rgb, srgb, rgb, width, height);

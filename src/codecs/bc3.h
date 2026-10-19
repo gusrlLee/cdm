@@ -10,6 +10,7 @@ namespace bc3
         bc4::Block alpha;
         bc1::Block rgb;
     };
+
     static_assert(sizeof(Block) == 16 && offsetof(Block, rgb) == 8);
 
     // BC3 alpha interpolates integers; BC4 keeps fractional normalized values.
@@ -25,7 +26,8 @@ namespace bc3
         return static_cast<float>(value) * (1.0f / 255.0f);
     }
 
-    inline void get_quadrant_means(const Block &block, bool srgb, Float4 means[4], uint32_t width = 4, uint32_t height = 4)
+    inline void get_quadrant_means(const Block &block, bool srgb, Float4 means[4], uint32_t width = 4,
+                                   uint32_t height = 4)
     {
         Float3 rgb[4];
         bc2::get_rgb_quadrant_means(block.rgb, srgb, rgb, width, height);

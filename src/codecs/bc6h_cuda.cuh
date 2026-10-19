@@ -35,10 +35,9 @@ namespace bc6h
         {
             const uint32_t subset = keys[entry] & 1u, selector = keys[entry] >> 1;
             const int *a = symbolic.endpoints[subset * 2], *b = symbolic.endpoints[subset * 2 + 1];
-            Float3 value = {
-                half_to_float(finish_unquantize(interpolate(a[0], b[0], weights, selector), 0)),
-                half_to_float(finish_unquantize(interpolate(a[1], b[1], weights, selector), 0)),
-                half_to_float(finish_unquantize(interpolate(a[2], b[2], weights, selector), 0))};
+            Float3 value = {half_to_float(finish_unquantize(interpolate(a[0], b[0], weights, selector), 0)),
+                            half_to_float(finish_unquantize(interpolate(a[1], b[1], weights, selector), 0)),
+                            half_to_float(finish_unquantize(interpolate(a[2], b[2], weights, selector), 0))};
             result += sanitize_hdr(value) * (float(counts[entry]) * 0.25f);
         }
         return result;
@@ -109,7 +108,8 @@ namespace bc6h
             const uint64_t low = 3u | (uint64_t(endpoints[0][0]) << 5) | (uint64_t(endpoints[0][1]) << 15) |
                                  (uint64_t(endpoints[0][2]) << 25) | (uint64_t(endpoints[1][0]) << 35) |
                                  (uint64_t(endpoints[1][1]) << 45) | (uint64_t(endpoints[1][2] & 0x1ffu) << 55);
-            const uint64_t high = uint64_t(endpoints[1][2] >> 9) | uint32_t(selector_bits) | (uint64_t(high_half) << 32);
+            const uint64_t high =
+                uint64_t(endpoints[1][2] >> 9) | uint32_t(selector_bits) | (uint64_t(high_half) << 32);
             *output = {low, high};
         }
     }

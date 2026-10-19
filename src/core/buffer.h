@@ -3,10 +3,9 @@
 #include <cstddef>
 #include <cuda_runtime.h>
 
-template <typename T>
-class DeviceBuffer
+template <typename T> class DeviceBuffer
 {
-public:
+  public:
     DeviceBuffer() = default;
 
     // Prevent two buffers from owning the same GPU memory.
@@ -27,9 +26,7 @@ public:
 
         T *replacement = nullptr;
 
-        if (cudaMalloc(
-                reinterpret_cast<void **>(&replacement),
-                count * sizeof(T)) != cudaSuccess)
+        if (cudaMalloc(reinterpret_cast<void **>(&replacement), count * sizeof(T)) != cudaSuccess)
         {
             return false;
         }
@@ -47,7 +44,7 @@ public:
         return data_;
     }
 
-private:
+  private:
     T *data_ = nullptr;
     size_t capacity_ = 0;
 };

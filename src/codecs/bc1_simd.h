@@ -47,11 +47,8 @@ namespace bc1
             endpoints[lane] = encode_rgb565(endpoint, is_srgb);
         }
 
-        return _mm_setr_epi32(
-            static_cast<int>(endpoints[0]),
-            static_cast<int>(endpoints[1]),
-            static_cast<int>(endpoints[2]),
-            static_cast<int>(endpoints[3]));
+        return _mm_setr_epi32(static_cast<int>(endpoints[0]), static_cast<int>(endpoints[1]),
+                              static_cast<int>(endpoints[2]), static_cast<int>(endpoints[3]));
     }
 
     // Convert four 8-bit channel values to linear floats.
@@ -118,11 +115,8 @@ namespace bc1
             const __m128i color2 = _mm_blendv_epi8(midpoint, color2_four, four_color);
             const __m128i color3 = _mm_and_si128(color3_four, four_color);
 
-            const __m128 values[4] = {
-                decode_channel(a, is_srgb),
-                decode_channel(b, is_srgb),
-                decode_channel(color2, is_srgb),
-                decode_channel(color3, is_srgb)};
+            const __m128 values[4] = {decode_channel(a, is_srgb), decode_channel(b, is_srgb),
+                                      decode_channel(color2, is_srgb), decode_channel(color3, is_srgb)};
 
             for (uint32_t selector = 0; selector < 4; ++selector)
             {
@@ -165,9 +159,9 @@ namespace bc1
 
         // A selector matches when its two bits match the pattern.
         const __m128i flags0 = _mm_andnot_si128(_mm_or_si128(low, high), mask); // 00
-        const __m128i flags1 = _mm_andnot_si128(high, low);  // 01
-        const __m128i flags2 = _mm_andnot_si128(low, high);  // 10
-        const __m128i flags3 = _mm_and_si128(low, high);     // 11
+        const __m128i flags1 = _mm_andnot_si128(high, low);                     // 01
+        const __m128i flags2 = _mm_andnot_si128(low, high);                     // 10
+        const __m128i flags3 = _mm_and_si128(low, high);                        // 11
 
         histogram[0] = count_2x2_regions_x4(flags0);
         histogram[1] = count_2x2_regions_x4(flags1);
@@ -176,8 +170,7 @@ namespace bc1
     }
 
     // Compute one quadrant's mean color for four blocks.
-    template <uint32_t Shift>
-    inline Float3x4 quadrant_mean_x4(const Float3x4 palette[4], const __m128i histogram[4])
+    template <uint32_t Shift> inline Float3x4 quadrant_mean_x4(const Float3x4 palette[4], const __m128i histogram[4])
     {
         const __m128 zero = _mm_setzero_ps();
         const __m128 scale = _mm_set1_ps(0.25f);
@@ -199,7 +192,8 @@ namespace bc1
     }
 
     // Compute quadrant means for four full 4x4 blocks.
-    inline void get_quadrant_means_x4(const Block& b0, const Block& b1, const Block& b2, const Block& b3, bool is_srgb, Float3x4 means[4])
+    inline void get_quadrant_means_x4(const Block &b0, const Block &b1, const Block &b2, const Block &b3, bool is_srgb,
+                                      Float3x4 means[4])
     {
         const __m128i c0 = _mm_setr_epi32(b0.c0, b1.c0, b2.c0, b3.c0);
         const __m128i c1 = _mm_setr_epi32(b0.c1, b1.c1, b2.c1, b3.c1);
@@ -207,11 +201,8 @@ namespace bc1
         Float3x4 palette[4];
         get_palette_x4(c0, c1, is_srgb, palette);
 
-        const __m128i indices = _mm_setr_epi32(
-            static_cast<int>(b0.indices),
-            static_cast<int>(b1.indices),
-            static_cast<int>(b2.indices),
-            static_cast<int>(b3.indices));
+        const __m128i indices = _mm_setr_epi32(static_cast<int>(b0.indices), static_cast<int>(b1.indices),
+                                               static_cast<int>(b2.indices), static_cast<int>(b3.indices));
 
         __m128i histogram[4];
         selector_region_counts_x4(indices, histogram);
@@ -240,7 +231,8 @@ namespace bc1
 
                 // Strict comparison keeps the lower selector on ties.
                 best_distance = _mm_blendv_ps(best_distance, distance, closer);
-                best_selector = _mm_blendv_epi8(best_selector, _mm_set1_epi32(static_cast<int>(selector)), _mm_castps_si128(closer));
+                best_selector = _mm_blendv_epi8(best_selector, _mm_set1_epi32(static_cast<int>(selector)),
+                                                _mm_castps_si128(closer));
             }
 
             // Place the selector in its row-major texel position.
@@ -254,11 +246,8 @@ namespace bc1
     }
 
     // Quantize endpoints and pack four BC1 blocks.
-    inline void pack_blocks_x4(
-        const __m128 projections[16],
-        const Float3x4& mean, const Float3x4& axis,
-        const Float3x4& p0, const Float3x4& p1,
-        bool is_srgb, Block output[4])
+    inline void pack_blocks_x4(const __m128 projections[16], const Float3x4 &mean, const Float3x4 &axis,
+                               const Float3x4 &p0, const Float3x4 &p1, bool is_srgb, Block output[4])
     {
         const __m128i endpoint0 = encode_rgb565(p0, is_srgb);
         const __m128i endpoint1 = encode_rgb565(p1, is_srgb);
@@ -282,16 +271,15 @@ namespace bc1
         uint32_t colors1[4];
         uint32_t indices[4];
 
-        _mm_storeu_si128(reinterpret_cast<__m128i*>(colors0), c0);
-        _mm_storeu_si128(reinterpret_cast<__m128i*>(colors1), c1);
-        _mm_storeu_si128(reinterpret_cast<__m128i*>(indices), packed_indices);
+        _mm_storeu_si128(reinterpret_cast<__m128i *>(colors0), c0);
+        _mm_storeu_si128(reinterpret_cast<__m128i *>(colors1), c1);
+        _mm_storeu_si128(reinterpret_cast<__m128i *>(indices), packed_indices);
 
         for (uint32_t lane = 0; lane < 4; ++lane)
         {
             output[lane] = {static_cast<uint16_t>(colors0[lane]), static_cast<uint16_t>(colors1[lane]), indices[lane]};
         }
     }
-
 
     // Encode four blocks from their 16 samples.
     inline void encode_samples_x4(const Float3x4 samples[16], bool is_srgb, Block output[4])
@@ -328,15 +316,14 @@ namespace bc1
 
     // Store eight parent means in their original horizontal order.
     // The destination must contain eight valid texels starting at (x, y).
-    inline void store_block_mean_pairs_x4(
-        const Float3x4 left_quadrants[4],
-        const Float3x4 right_quadrants[4],
-        const MeanImage& destination, uint32_t x, uint32_t y)
+    inline void store_block_mean_pairs_x4(const Float3x4 left_quadrants[4], const Float3x4 right_quadrants[4],
+                                          const MeanImage &destination, uint32_t x, uint32_t y)
     {
         const __m128 weight = _mm_set1_ps(0.25f);
 
         const Float3x4 left = (left_quadrants[0] + left_quadrants[1] + left_quadrants[2] + left_quadrants[3]) * weight;
-        const Float3x4 right = (right_quadrants[0] + right_quadrants[1] + right_quadrants[2] + right_quadrants[3]) * weight;
+        const Float3x4 right =
+            (right_quadrants[0] + right_quadrants[1] + right_quadrants[2] + right_quadrants[3]) * weight;
         const size_t index = static_cast<size_t>(y) * destination.width + x;
 
         // Interleave the left and right parents of each child block.
@@ -352,11 +339,8 @@ namespace bc1
 
     // Generate four full child blocks from two rows of eight parent blocks.
     // source_x and source_y are positions in the parent mean image.
-    inline void generate_child_blocks_x4(
-        const Block* row0, const Block* row1,
-        bool is_srgb, const MeanImage& means,
-        uint32_t source_x, uint32_t source_y,
-        Block output[4])
+    inline void generate_child_blocks_x4(const Block *row0, const Block *row1, bool is_srgb, const MeanImage &means,
+                                         uint32_t source_x, uint32_t source_y, Block output[4])
     {
         Float3x4 samples[16];
 
@@ -375,10 +359,8 @@ namespace bc1
 
     // Encode four full blocks from the mean image.
     // The source must contain the entire 16x4 texel area.
-    inline void generate_child_blocks_from_means_x4(
-        const MeanImage& source,
-        uint32_t block_x, uint32_t block_y,
-        bool is_srgb, Block output[4])
+    inline void generate_child_blocks_from_means_x4(const MeanImage &source, uint32_t block_x, uint32_t block_y,
+                                                    bool is_srgb, Block output[4])
     {
         Float3x4 samples[16];
 
@@ -390,10 +372,9 @@ namespace bc1
             const size_t index = static_cast<size_t>(y) * source.width + x;
 
             // Gather the same local texel from four neighboring blocks.
-            samples[i] = {
-                _mm_setr_ps(source.r[index], source.r[index + 4], source.r[index + 8], source.r[index + 12]),
-                _mm_setr_ps(source.g[index], source.g[index + 4], source.g[index + 8], source.g[index + 12]),
-                _mm_setr_ps(source.b[index], source.b[index + 4],source.b[index + 8], source.b[index + 12])};
+            samples[i] = {_mm_setr_ps(source.r[index], source.r[index + 4], source.r[index + 8], source.r[index + 12]),
+                          _mm_setr_ps(source.g[index], source.g[index + 4], source.g[index + 8], source.g[index + 12]),
+                          _mm_setr_ps(source.b[index], source.b[index + 4], source.b[index + 8], source.b[index + 12])};
         }
 
         encode_samples_x4(samples, is_srgb, output);

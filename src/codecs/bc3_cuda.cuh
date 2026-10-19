@@ -6,8 +6,8 @@
 
 namespace bc3
 {
-    __device__ __forceinline__ Float4 device_quadrant_mean(const Block &block, uint32_t q, bool srgb,
-                                                         uint32_t width, uint32_t height)
+    __device__ __forceinline__ Float4 device_quadrant_mean(const Block &block, uint32_t q, bool srgb, uint32_t width,
+                                                           uint32_t height)
     {
         const Float3 rgb = bc2::device_rgb_quadrant_mean(block.rgb, q, srgb, width, height);
         uint32_t counts[8]{};

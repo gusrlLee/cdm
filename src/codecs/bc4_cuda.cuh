@@ -48,7 +48,8 @@ namespace bc4
         return static_cast<float>(numerator) * (scale / static_cast<float>(divisor));
     }
 
-    __device__ __forceinline__ float device_quadrant_mean(const Block &block, uint32_t quadrant, uint32_t valid_width = 4, uint32_t valid_height = 4)
+    __device__ __forceinline__ float device_quadrant_mean(const Block &block, uint32_t quadrant,
+                                                          uint32_t valid_width = 4, uint32_t valid_height = 4)
     {
         const uint32_t start_x = (quadrant & 1u) * 2;
         const uint32_t start_y = (quadrant >> 1u) * 2;
@@ -93,7 +94,8 @@ namespace bc4
         const uint32_t source_x = x % valid_width;
         const uint32_t source_y = y % valid_height;
 
-        const uint32_t source_lane = (source_x & 1u) | ((source_y & 1u) << 1u) | ((source_x & 2u) << 1u) | ((source_y & 2u) << 2u);
+        const uint32_t source_lane =
+            (source_x & 1u) | ((source_y & 1u) << 1u) | ((source_x & 2u) << 1u) | ((source_y & 2u) << 2u);
 
         return __shfl_sync(mask, sample, source_lane, 16);
     }
@@ -192,8 +194,8 @@ namespace bc4
     }
 
     void generate_base_mip_cuda(const Block *source, MipLevel source_level, Block *destination,
-                               MipLevel destination_level, MeanImage means, uint32_t groups, uint32_t threads);
-    void generate_mean_mip_cuda(MeanImage source, Block *destination, MipLevel destination_level,
-                               MeanImage next_means, uint32_t groups, uint32_t threads);
+                                MipLevel destination_level, MeanImage means, uint32_t groups, uint32_t threads);
+    void generate_mean_mip_cuda(MeanImage source, Block *destination, MipLevel destination_level, MeanImage next_means,
+                                uint32_t groups, uint32_t threads);
 
 } // namespace bc4

@@ -23,14 +23,16 @@ namespace bc4
         {
             const int weight = static_cast<int>(selector) - 1;
 
-            const __m128i numerator7 = _mm_add_epi32(_mm_mullo_epi32(e0, _mm_set1_epi32(7 - weight)), _mm_mullo_epi32(e1, _mm_set1_epi32(weight)));
+            const __m128i numerator7 = _mm_add_epi32(_mm_mullo_epi32(e0, _mm_set1_epi32(7 - weight)),
+                                                     _mm_mullo_epi32(e1, _mm_set1_epi32(weight)));
             const __m128 value7 = _mm_mul_ps(_mm_cvtepi32_ps(numerator7), scale7);
 
             __m128 value5;
 
             if (selector < 6)
             {
-                const __m128i numerator5 = _mm_add_epi32(_mm_mullo_epi32(e0, _mm_set1_epi32(5 - weight)), _mm_mullo_epi32(e1, _mm_set1_epi32(weight)));
+                const __m128i numerator5 = _mm_add_epi32(_mm_mullo_epi32(e0, _mm_set1_epi32(5 - weight)),
+                                                         _mm_mullo_epi32(e1, _mm_set1_epi32(weight)));
                 value5 = _mm_mul_ps(_mm_cvtepi32_ps(numerator5), scale5);
             }
             else
@@ -43,7 +45,8 @@ namespace bc4
     }
 
     // Compute quadrant means for four full BC4 blocks.
-    inline void get_quadrant_means_unorm_x4(const Block &b0, const Block &b1, const Block &b2, const Block &b3, __m128 means[4])
+    inline void get_quadrant_means_unorm_x4(const Block &b0, const Block &b1, const Block &b2, const Block &b3,
+                                            __m128 means[4])
     {
         const __m128i e0 = _mm_setr_epi32(b0.e0, b1.e0, b2.e0, b3.e0);
         const __m128i e1 = _mm_setr_epi32(b0.e1, b1.e1, b2.e1, b3.e1);
@@ -72,7 +75,8 @@ namespace bc4
                     const uint32_t x = start_x + dx;
                     const uint32_t y = start_y + dy;
 
-                    const __m128i indices = _mm_setr_epi32(get_selector(b0, x, y), get_selector(b1, x, y), get_selector(b2, x, y), get_selector(b3, x, y));
+                    const __m128i indices = _mm_setr_epi32(get_selector(b0, x, y), get_selector(b1, x, y),
+                                                           get_selector(b2, x, y), get_selector(b3, x, y));
 
                     for (uint32_t selector = 0; selector < 8; ++selector)
                     {
@@ -153,7 +157,8 @@ namespace bc4
             const __m128 closer = _mm_cmplt_ps(error, best_error);
 
             best_error = _mm_blendv_ps(best_error, error, closer);
-            best_selector = _mm_blendv_epi8(best_selector, _mm_set1_epi32(static_cast<int>(selector)), _mm_castps_si128(closer));
+            best_selector =
+                _mm_blendv_epi8(best_selector, _mm_set1_epi32(static_cast<int>(selector)), _mm_castps_si128(closer));
         }
 
         return best_selector;
@@ -204,12 +209,19 @@ namespace bc4
     }
 
     // Store eight parent means; destination must contain an 8x1 area.
-    inline void store_block_mean_pairs_x4(const __m128 left_quadrants[4], const __m128 right_quadrants[4], const MeanImage &destination, uint32_t x, uint32_t y)
+    inline void store_block_mean_pairs_x4(const __m128 left_quadrants[4], const __m128 right_quadrants[4],
+                                          const MeanImage &destination, uint32_t x, uint32_t y)
     {
         const __m128 weight = _mm_set1_ps(0.25f);
 
-        const __m128 left = _mm_mul_ps(_mm_add_ps(_mm_add_ps(_mm_add_ps(left_quadrants[0], left_quadrants[1]), left_quadrants[2]), left_quadrants[3]), weight);
-        const __m128 right = _mm_mul_ps(_mm_add_ps(_mm_add_ps(_mm_add_ps(right_quadrants[0], right_quadrants[1]), right_quadrants[2]), right_quadrants[3]), weight);
+        const __m128 left =
+            _mm_mul_ps(_mm_add_ps(_mm_add_ps(_mm_add_ps(left_quadrants[0], left_quadrants[1]), left_quadrants[2]),
+                                  left_quadrants[3]),
+                       weight);
+        const __m128 right =
+            _mm_mul_ps(_mm_add_ps(_mm_add_ps(_mm_add_ps(right_quadrants[0], right_quadrants[1]), right_quadrants[2]),
+                                  right_quadrants[3]),
+                       weight);
 
         const size_t index = static_cast<size_t>(y) * destination.width + x;
 
@@ -225,7 +237,8 @@ namespace bc4
 
     // Generate four full child blocks from two rows of eight parents.
     // The mean destination must contain an 8x2 area.
-    inline void generate_child_blocks_x4(const Block *row0, const Block *row1, const MeanImage &means, uint32_t source_x, uint32_t source_y, Block output[4])
+    inline void generate_child_blocks_x4(const Block *row0, const Block *row1, const MeanImage &means,
+                                         uint32_t source_x, uint32_t source_y, Block output[4])
     {
         __m128 samples[16];
 
@@ -241,7 +254,8 @@ namespace bc4
     }
 
     // Source must contain four full blocks in a 16x4 area.
-    inline void generate_child_blocks_from_means_x4(const MeanImage &source, uint32_t block_x, uint32_t block_y, Block output[4])
+    inline void generate_child_blocks_from_means_x4(const MeanImage &source, uint32_t block_x, uint32_t block_y,
+                                                    Block output[4])
     {
         __m128 samples[16];
 

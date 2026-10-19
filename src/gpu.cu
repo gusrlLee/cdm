@@ -37,13 +37,16 @@ static bool initialize_color_tables()
     const std::array<float, 31> thresholds31 = bc1::make_srgb_quantize_thresholds<31>();
     const std::array<float, 63> thresholds63 = bc1::make_srgb_quantize_thresholds<63>();
 
-    if (!cuda_chk(cudaMemcpyToSymbol(g_srgb_to_linear, c_srgb_to_linear, sizeof(c_srgb_to_linear)), "Upload sRGB table"))
+    if (!cuda_chk(cudaMemcpyToSymbol(g_srgb_to_linear, c_srgb_to_linear, sizeof(c_srgb_to_linear)),
+                  "Upload sRGB table"))
         return false;
 
-    if (!cuda_chk(cudaMemcpyToSymbol(g_threshold31, thresholds31.data(), thresholds31.size() * sizeof(float)), "Upload RGB565 5-bit thresholds"))
+    if (!cuda_chk(cudaMemcpyToSymbol(g_threshold31, thresholds31.data(), thresholds31.size() * sizeof(float)),
+                  "Upload RGB565 5-bit thresholds"))
         return false;
 
-    if (!cuda_chk(cudaMemcpyToSymbol(g_threshold63, thresholds63.data(), thresholds63.size() * sizeof(float)), "Upload RGB565 6-bit thresholds"))
+    if (!cuda_chk(cudaMemcpyToSymbol(g_threshold63, thresholds63.data(), thresholds63.size() * sizeof(float)),
+                  "Upload RGB565 6-bit thresholds"))
         return false;
 
     init = true;
@@ -77,8 +80,10 @@ struct CudaWorkspace
         const size_t base_count = static_cast<size_t>(bw) * bh;
         const size_t scratch_count = static_cast<size_t>(sw) * sh;
 
-        const size_t channels = (image.format == Format::BC7 || image.format == Format::BC2 || image.format == Format::BC3) ? 4 : 3;
-        return data.allocate(image.data_size) && base.allocate(base_count * channels) && scratch.allocate(scratch_count * channels);
+        const size_t channels =
+            (image.format == Format::BC7 || image.format == Format::BC2 || image.format == Format::BC3) ? 4 : 3;
+        return data.allocate(image.data_size) && base.allocate(base_count * channels) &&
+               scratch.allocate(scratch_count * channels);
     }
 };
 
@@ -89,7 +94,8 @@ static MeanImage device_mean_view(float *data, size_t channel_capacity, uint32_t
 }
 
 // Generate mip 1 and store the means needed by later levels.
-static __global__ void generate_base_mip(const bc1::Block *source, MipLevel source_level, bc1::Block *destination, MipLevel destination_level, MeanImage means, bool is_srgb)
+static __global__ void generate_base_mip(const bc1::Block *source, MipLevel source_level, bc1::Block *destination,
+                                         MipLevel destination_level, MeanImage means, bool is_srgb)
 {
     const uint32_t output = blockIdx.x * (blockDim.x / 16) + threadIdx.x / 16;
     const uint32_t output_count = destination_level.block_count_x * destination_level.block_count_y;
@@ -133,10 +139,12 @@ static __global__ void generate_base_mip(const bc1::Block *source, MipLevel sour
     if (valid_width < 4 || valid_height < 4)
         sample = bc1::repeat_small_sample(sample, valid_width, valid_height);
 
-    const Float3 parent_mean = {sum4(sample.r, mask) * 0.25f, sum4(sample.g, mask) * 0.25f, sum4(sample.b, mask) * 0.25f};
+    const Float3 parent_mean = {sum4(sample.r, mask) * 0.25f, sum4(sample.g, mask) * 0.25f,
+                                sum4(sample.b, mask) * 0.25f};
 
     // Avoid duplicate writes when parent coordinates are clamped.
-    const bool unique_parent = parent == 0 || (parent == 1 && x1 != x0) || (parent == 2 && y1 != y0) || (parent == 3 && x1 != x0 && y1 != y0);
+    const bool unique_parent =
+        parent == 0 || (parent == 1 && x1 != x0) || (parent == 2 && y1 != y0) || (parent == 3 && x1 != x0 && y1 != y0);
 
     if (quadrant == 0 && unique_parent)
         means.set(sx, sy, parent_mean);
@@ -145,7 +153,8 @@ static __global__ void generate_base_mip(const bc1::Block *source, MipLevel sour
 }
 
 // Encode a mip level and build the next mean image.
-static __global__ void generate_mean_mip(MeanImage source, bc1::Block *destination, MipLevel destination_level, MeanImage next_means, bool is_srgb)
+static __global__ void generate_mean_mip(MeanImage source, bc1::Block *destination, MipLevel destination_level,
+                                         MeanImage next_means, bool is_srgb)
 {
     const uint32_t output = blockIdx.x * (blockDim.x / 16) + threadIdx.x / 16;
     const uint32_t output_count = destination_level.block_count_x * destination_level.block_count_y;
@@ -205,13 +214,14 @@ __device__ __forceinline__ Float4 repeat_extended_sample(Float4 sample, uint32_t
 
 __device__ __forceinline__ Float4 average_extended_sample(Float4 sample, unsigned mask)
 {
-    return {sum4(sample.r, mask) * 0.25f, sum4(sample.g, mask) * 0.25f,
-            sum4(sample.b, mask) * 0.25f, sum4(sample.a, mask) * 0.25f};
+    return {sum4(sample.r, mask) * 0.25f, sum4(sample.g, mask) * 0.25f, sum4(sample.b, mask) * 0.25f,
+            sum4(sample.a, mask) * 0.25f};
 }
 
 // The flag selects sRGB for BC2/3 and signed channels for BC5. BC6H ignores it.
 template <typename Block, typename Means>
-static __global__ void generate_extended_base_mip(const Block *source, MipLevel source_level, Block *destination, MipLevel destination_level, Means means, bool color_mode)
+static __global__ void generate_extended_base_mip(const Block *source, MipLevel source_level, Block *destination,
+                                                  MipLevel destination_level, Means means, bool color_mode)
 {
     const uint32_t output = blockIdx.x * (blockDim.x / 16) + threadIdx.x / 16;
     const uint32_t output_count = destination_level.block_count_x * destination_level.block_count_y;
@@ -258,7 +268,8 @@ static __global__ void generate_extended_base_mip(const Block *source, MipLevel 
     const auto parent_mean = average_extended_sample(sample, mask);
 
     // Avoid duplicate writes when parent coordinates are clamped.
-    const bool unique_parent = parent == 0 || (parent == 1 && x1 != x0) || (parent == 2 && y1 != y0) || (parent == 3 && x1 != x0 && y1 != y0);
+    const bool unique_parent =
+        parent == 0 || (parent == 1 && x1 != x0) || (parent == 2 && y1 != y0) || (parent == 3 && x1 != x0 && y1 != y0);
 
     if (quadrant == 0 && unique_parent)
         means.set(sx, sy, parent_mean);
@@ -268,7 +279,8 @@ static __global__ void generate_extended_base_mip(const Block *source, MipLevel 
 
 // Encode a mip level and build the next mean image.
 template <typename Block, typename Means>
-static __global__ void generate_extended_mean_mip(Means source, Block *destination, MipLevel destination_level, Means next_means, bool color_mode)
+static __global__ void generate_extended_mean_mip(Means source, Block *destination, MipLevel destination_level,
+                                                  Means next_means, bool color_mode)
 {
     const uint32_t output = blockIdx.x * (blockDim.x / 16) + threadIdx.x / 16;
     const uint32_t output_count = destination_level.block_count_x * destination_level.block_count_y;
@@ -324,7 +336,8 @@ bool generate_mipmaps_cuda(Image &image)
     case Format::BC6H_UF16:
         break;
     case Format::BC7:
-        if (!image.is_srgb) return false;
+        if (!image.is_srgb)
+            return false;
         break;
     default:
         return false;
@@ -334,10 +347,12 @@ bool generate_mipmaps_cuda(Image &image)
 
     static CudaWorkspace workspace;
 
-    if ((image.format == Format::BC1 || image.format == Format::BC2 || image.format == Format::BC3) && !initialize_color_tables())
+    if ((image.format == Format::BC1 || image.format == Format::BC2 || image.format == Format::BC3) &&
+        !initialize_color_tables())
         return false;
 
-    if (image.format == Format::BC7 && !initialize_bc7_tables()) return false;
+    if (image.format == Format::BC7 && !initialize_bc7_tables())
+        return false;
 
     if (!workspace.prepare(image))
         return false;
@@ -346,7 +361,9 @@ bool generate_mipmaps_cuda(Image &image)
     uint8_t *device_data = workspace.data.get();
 
     // Upload only mip 0.
-    if (!cuda_chk(cudaMemcpy(device_data + base_level.byte_offset, image.data + base_level.byte_offset, base_level.byte_size, cudaMemcpyHostToDevice), "Upload mip 0"))
+    if (!cuda_chk(cudaMemcpy(device_data + base_level.byte_offset, image.data + base_level.byte_offset,
+                             base_level.byte_size, cudaMemcpyHostToDevice),
+                  "Upload mip 0"))
         return false;
 
     const uint32_t bw = base_level.block_count_x;
@@ -366,8 +383,12 @@ bool generate_mipmaps_cuda(Image &image)
         float *base = workspace.base.get();
         float *scratch_data = workspace.scratch.get();
         rgba_means = {base, base + base_count, base + base_count * 2, base + base_count * 3, width, height};
-        rgba_scratch = {scratch_data, scratch_data + scratch_count, scratch_data + scratch_count * 2,
-                    scratch_data + scratch_count * 3, 1, 1};
+        rgba_scratch = {scratch_data,
+                        scratch_data + scratch_count,
+                        scratch_data + scratch_count * 2,
+                        scratch_data + scratch_count * 3,
+                        1,
+                        1};
     }
 
     const uint32_t threads = 256;
@@ -406,10 +427,12 @@ bool generate_mipmaps_cuda(Image &image)
             {
                 const auto *source = reinterpret_cast<const bc2::Block *>(device_data + base_level.byte_offset);
                 if (image.format == Format::BC2)
-                    generate_extended_base_mip<<<groups, threads>>>(source, base_level, destination, current, rgba_means, image.is_srgb);
+                    generate_extended_base_mip<<<groups, threads>>>(source, base_level, destination, current,
+                                                                    rgba_means, image.is_srgb);
                 else
-                    generate_extended_base_mip<<<groups, threads>>>(reinterpret_cast<const bc3::Block *>(source), base_level,
-                                                                  reinterpret_cast<bc3::Block *>(destination), current, rgba_means, image.is_srgb);
+                    generate_extended_base_mip<<<groups, threads>>>(
+                        reinterpret_cast<const bc3::Block *>(source), base_level,
+                        reinterpret_cast<bc3::Block *>(destination), current, rgba_means, image.is_srgb);
             }
             else
             {
@@ -421,10 +444,13 @@ bool generate_mipmaps_cuda(Image &image)
                     next = rgba_scratch;
                 }
                 if (image.format == Format::BC2)
-                    generate_extended_mean_mip<<<groups, threads>>>(rgba_means, destination, current, next, image.is_srgb);
+                    generate_extended_mean_mip<<<groups, threads>>>(rgba_means, destination, current, next,
+                                                                    image.is_srgb);
                 else
-                    generate_extended_mean_mip<<<groups, threads>>>(rgba_means, reinterpret_cast<bc3::Block *>(destination), current, next, image.is_srgb);
-                if (next.r != nullptr) std::swap(rgba_means, rgba_scratch);
+                    generate_extended_mean_mip<<<groups, threads>>>(
+                        rgba_means, reinterpret_cast<bc3::Block *>(destination), current, next, image.is_srgb);
+                if (next.r != nullptr)
+                    std::swap(rgba_means, rgba_scratch);
             }
             if (!cuda_chk(cudaGetLastError(), "Launch BC2/BC3 mip kernel"))
             {
@@ -453,7 +479,8 @@ bool generate_mipmaps_cuda(Image &image)
                     next = rgba_scratch;
                 }
                 bc7::generate_mean_mip_cuda<<<groups, threads>>>(rgba_means, destination, current, next);
-                if (next.r != nullptr) std::swap(rgba_means, rgba_scratch);
+                if (next.r != nullptr)
+                    std::swap(rgba_means, rgba_scratch);
             }
             if (!cuda_chk(cudaGetLastError(), "Launch BC7 mip kernel"))
             {
@@ -491,7 +518,8 @@ bool generate_mipmaps_cuda(Image &image)
             {
                 const auto *source = reinterpret_cast<const bc5::Block *>(device_data + base_level.byte_offset);
                 auto *destination = reinterpret_cast<bc5::Block *>(device_data + current.byte_offset);
-                generate_extended_base_mip<<<groups, threads>>>(source, base_level, destination, current, means, image.format == Format::BC5_SNORM);
+                generate_extended_base_mip<<<groups, threads>>>(source, base_level, destination, current, means,
+                                                                image.format == Format::BC5_SNORM);
                 break;
             }
 
@@ -538,7 +566,8 @@ bool generate_mipmaps_cuda(Image &image)
             case Format::BC5_SNORM:
             {
                 auto *destination = reinterpret_cast<bc5::Block *>(device_data + current.byte_offset);
-                generate_extended_mean_mip<<<groups, threads>>>(means, destination, current, next_means, image.format == Format::BC5_SNORM);
+                generate_extended_mean_mip<<<groups, threads>>>(means, destination, current, next_means,
+                                                                image.format == Format::BC5_SNORM);
                 break;
             }
 
@@ -570,7 +599,9 @@ bool generate_mipmaps_cuda(Image &image)
     }
 
     float generation_ms = 0.0f;
-    const bool timed = cuda_chk(cudaEventRecord(end), "Record end event") && cuda_chk(cudaEventSynchronize(end), "Wait for mip generation") && cuda_chk(cudaEventElapsedTime(&generation_ms, start, end), "Measure mip generation");
+    const bool timed = cuda_chk(cudaEventRecord(end), "Record end event") &&
+                       cuda_chk(cudaEventSynchronize(end), "Wait for mip generation") &&
+                       cuda_chk(cudaEventElapsedTime(&generation_ms, start, end), "Measure mip generation");
 
     cudaEventDestroy(end);
     cudaEventDestroy(start);
@@ -585,5 +616,6 @@ bool generate_mipmaps_cuda(Image &image)
     const MipLevel &last = image.mips[image.mip_count - 1];
     const size_t bytes = last.byte_offset + last.byte_size - offset;
 
-    return cuda_chk(cudaMemcpy(image.data + offset, device_data + offset, bytes, cudaMemcpyDeviceToHost), "Download mip chain");
+    return cuda_chk(cudaMemcpy(image.data + offset, device_data + offset, bytes, cudaMemcpyDeviceToHost),
+                    "Download mip chain");
 }

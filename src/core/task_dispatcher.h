@@ -12,14 +12,13 @@
 
 class TaskDispatcher
 {
-public:
+  public:
     TaskDispatcher()
     {
         const size_t count = std::max(1u, std::thread::hardware_concurrency());
         workers_.reserve(count - 1);
         for (size_t i = 1; i < count; ++i)
-            workers_.emplace_back([this]
-                                  { worker_loop(); });
+            workers_.emplace_back([this] { worker_loop(); });
     }
 
     ~TaskDispatcher()
@@ -33,8 +32,7 @@ public:
             worker.join();
     }
 
-    template <typename Function>
-    void parallel_rows(uint32_t rows, size_t work_items, Function function)
+    template <typename Function> void parallel_rows(uint32_t rows, size_t work_items, Function function)
     {
         if (work_items < 2048 || workers_.empty())
         {
@@ -46,13 +44,12 @@ public:
         for (uint32_t begin = 0; begin < rows; begin += rows_per_task)
         {
             const uint32_t end = std::min(begin + rows_per_task, rows);
-            enqueue([=]
-                    { function(begin, end); });
+            enqueue([=] { function(begin, end); });
         }
         sync();
     }
 
-private:
+  private:
     void enqueue(std::function<void()> task)
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -80,8 +77,7 @@ private:
             queue_.pop_back();
             finish(lock, std::move(task));
         }
-        all_done_.wait(lock, [this]
-                       { return queue_.empty() && active_jobs_ == 0; });
+        all_done_.wait(lock, [this] { return queue_.empty() && active_jobs_ == 0; });
     }
 
     void worker_loop()
@@ -89,8 +85,7 @@ private:
         for (;;)
         {
             std::unique_lock<std::mutex> lock(mutex_);
-            work_ready_.wait(lock, [this]
-                             { return stopping_ || !queue_.empty(); });
+            work_ready_.wait(lock, [this] { return stopping_ || !queue_.empty(); });
             if (stopping_ && queue_.empty())
                 return;
             std::function<void()> task = std::move(queue_.back());

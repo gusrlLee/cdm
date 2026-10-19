@@ -7,9 +7,9 @@
 
 struct MeanImage
 {
-    float* r = nullptr;
-    float* g = nullptr;
-    float* b = nullptr;
+    float *r = nullptr;
+    float *g = nullptr;
+    float *b = nullptr;
     uint32_t width = 0;
     uint32_t height = 0;
 
@@ -24,7 +24,7 @@ struct MeanImage
     }
 
     // Ignore writes outside the valid image area.
-    CDM_INLINE void set(uint32_t x, uint32_t y, const Float3& color) const
+    CDM_INLINE void set(uint32_t x, uint32_t y, const Float3 &color) const
     {
         if (x >= width || y >= height)
         {
@@ -38,7 +38,7 @@ struct MeanImage
     }
 };
 
-inline void downsample_means(const MeanImage& src, const MeanImage &dst, uint32_t begin_row, uint32_t end_row)
+inline void downsample_means(const MeanImage &src, const MeanImage &dst, uint32_t begin_row, uint32_t end_row)
 {
     for (uint32_t y = begin_row; y < end_row; ++y)
     {

@@ -74,7 +74,8 @@ namespace bc4
     }
 
     // Average one 2x2 region using selector counts
-    inline float get_quadrant_mean(const Block &block, const float palette[8], uint32_t quadrant, uint32_t valid_width = 4, uint32_t valid_height = 4)
+    inline float get_quadrant_mean(const Block &block, const float palette[8], uint32_t quadrant,
+                                   uint32_t valid_width = 4, uint32_t valid_height = 4)
     {
         const uint32_t start_x = (quadrant % 2) * 2;
         const uint32_t start_y = (quadrant / 2) * 2;
@@ -117,7 +118,8 @@ namespace bc4
     }
 
     // Compute the means of the four 2x2 regions
-    inline void get_quadrant_means_unorm(const Block &block, float means[4], uint32_t valid_width = 4, uint32_t valid_height = 4)
+    inline void get_quadrant_means_unorm(const Block &block, float means[4], uint32_t valid_width = 4,
+                                         uint32_t valid_height = 4)
     {
         float palette[8];
         get_palette_unorm(block, palette);
@@ -209,7 +211,8 @@ namespace bc4
         // Write the remaining bits when the selector crosses bytes.
         if (bit_in_byte > 5)
         {
-            block.selectors[byte_index + 1] = static_cast<uint8_t>((block.selectors[byte_index + 1] & ~(mask >> 8)) | (value >> 8));
+            block.selectors[byte_index + 1] =
+                static_cast<uint8_t>((block.selectors[byte_index + 1] & ~(mask >> 8)) | (value >> 8));
         }
     }
 
@@ -287,9 +290,9 @@ namespace bc4
     }
 
     // Generate one child block and preserve means for later mip levels.
-    inline Block generate_child_block_scalar(
-        const Block &p00, const Block &p10, const Block &p01, const Block &p11,
-        float parent_means[4], uint32_t valid_width, uint32_t valid_height, uint32_t source_width, uint32_t source_height)
+    inline Block generate_child_block_scalar(const Block &p00, const Block &p10, const Block &p01, const Block &p11,
+                                             float parent_means[4], uint32_t valid_width, uint32_t valid_height,
+                                             uint32_t source_width, uint32_t source_height)
     {
         const uint32_t left_width = parent_valid_extent(source_width, 0);
         const uint32_t right_width = parent_valid_extent(source_width, 1);
@@ -321,7 +324,8 @@ namespace bc4
     }
 
     // Encode stored means without reading compressed blocks again.
-    inline Block generate_child_block_from_means_scalar(const MeanImage &source, uint32_t block_x, uint32_t block_y, uint32_t valid_width, uint32_t valid_height)
+    inline Block generate_child_block_from_means_scalar(const MeanImage &source, uint32_t block_x, uint32_t block_y,
+                                                        uint32_t valid_width, uint32_t valid_height)
     {
         float samples[16];
 

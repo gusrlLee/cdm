@@ -72,6 +72,5 @@ struct Image
     size_t data_size = 0;
 };
 
-
 // Allocate space for the mip chain while preserving mip 0.
-bool prepare_mip_chain(Image& image);
+bool prepare_mip_chain(Image &image);

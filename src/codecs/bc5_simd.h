@@ -17,8 +17,10 @@ namespace bc5
             output[lane] = {quantize_signed(highs[lane]), quantize_signed(lows[lane]), {}};
         __m128 palette[8];
         for (uint32_t s = 0; s < 8; ++s)
-            palette[s] = _mm_setr_ps(signed_palette_value(output[0].e0, output[0].e1, s), signed_palette_value(output[1].e0, output[1].e1, s),
-                                     signed_palette_value(output[2].e0, output[2].e1, s), signed_palette_value(output[3].e0, output[3].e1, s));
+            palette[s] = _mm_setr_ps(signed_palette_value(output[0].e0, output[0].e1, s),
+                                     signed_palette_value(output[1].e0, output[1].e1, s),
+                                     signed_palette_value(output[2].e0, output[2].e1, s),
+                                     signed_palette_value(output[3].e0, output[3].e1, s));
         for (uint32_t i = 0; i < 16; ++i)
         {
             uint32_t selected[4];

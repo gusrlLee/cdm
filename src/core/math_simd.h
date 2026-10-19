@@ -34,7 +34,7 @@ inline Float3x4 &operator+=(Float3x4 &a, const Float3x4 &b)
 }
 
 // Compute one dot product per block without mixing lanes.
-inline __m128 dot(const Float3x4& a, const Float3x4& b)
+inline __m128 dot(const Float3x4 &a, const Float3x4 &b)
 {
     const __m128 r = _mm_mul_ps(a.r, b.r);
     const __m128 g = _mm_mul_ps(a.g, b.g);
@@ -44,7 +44,7 @@ inline __m128 dot(const Float3x4& a, const Float3x4& b)
 }
 
 // Compute one squared vector length per block.
-inline __m128 length_sq(const Float3x4& value)
+inline __m128 length_sq(const Float3x4 &value)
 {
     return dot(value, value);
 }
@@ -61,7 +61,7 @@ struct SymMat3x4
 };
 
 // Accumulate a weighted outer product for each block.
-inline void accumulate_outer(SymMat3x4& matrix, const Float3x4& value, __m128 weight)
+inline void accumulate_outer(SymMat3x4 &matrix, const Float3x4 &value, __m128 weight)
 {
     const __m128 rr = _mm_mul_ps(value.r, value.r);
     const __m128 rg = _mm_mul_ps(value.r, value.g);
@@ -79,7 +79,7 @@ inline void accumulate_outer(SymMat3x4& matrix, const Float3x4& value, __m128 we
 }
 
 // Multiply each block's matrix by its own vector.
-inline Float3x4 multiply(const SymMat3x4& matrix, const Float3x4& value)
+inline Float3x4 multiply(const SymMat3x4 &matrix, const Float3x4 &value)
 {
     const __m128 r0 = _mm_mul_ps(matrix.rr, value.r);
     const __m128 r1 = _mm_mul_ps(matrix.rg, value.g);
@@ -97,13 +97,13 @@ inline Float3x4 multiply(const SymMat3x4& matrix, const Float3x4& value)
 }
 
 // Choose b where the mask is true; otherwise choose a.
-inline Float3x4 select(const Float3x4& a, const Float3x4& b, __m128 mask)
+inline Float3x4 select(const Float3x4 &a, const Float3x4 &b, __m128 mask)
 {
     return {_mm_blendv_ps(a.r, b.r, mask), _mm_blendv_ps(a.g, b.g, mask), _mm_blendv_ps(a.b, b.b, mask)};
 }
 
 // Estimate one color axis per block.
-inline Float3x4 compute_principal_axis(const SymMat3x4& cov)
+inline Float3x4 compute_principal_axis(const SymMat3x4 &cov)
 {
     const __m128 zero = _mm_setzero_ps();
     const __m128 one = _mm_set1_ps(1.0f);
@@ -161,7 +161,7 @@ inline Float3x4 compute_principal_axis(const SymMat3x4& cov)
 }
 
 // Clamp each block's RGB values to the range [0, 1].
-inline Float3x4 clamp01(const Float3x4& color)
+inline Float3x4 clamp01(const Float3x4 &color)
 {
     const __m128 zero = _mm_setzero_ps();
     const __m128 one = _mm_set1_ps(1.0f);

@@ -6,10 +6,8 @@
 #include <immintrin.h>
 
 // Average each 2x2 region into one output value.
-inline void downsample_channel_simd(
-    const float* src, float* dst,
-    uint32_t src_width, uint32_t src_height,
-    uint32_t dst_width, uint32_t begin_row, uint32_t end_row)
+inline void downsample_channel_simd(const float *src, float *dst, uint32_t src_width, uint32_t src_height,
+                                    uint32_t dst_width, uint32_t begin_row, uint32_t end_row)
 {
     const __m128 weight = _mm_set1_ps(0.25f); // for box filtering
 
@@ -18,9 +16,9 @@ inline void downsample_channel_simd(
         const uint32_t y0 = y * 2;
         const uint32_t y1 = std::min(y0 + 1, src_height - 1);
 
-        const float* row0 = src + static_cast<size_t>(y0) * src_width;
-        const float* row1 = src + static_cast<size_t>(y1) * src_width;
-        float* output = dst + static_cast<size_t>(y) * dst_width;
+        const float *row0 = src + static_cast<size_t>(y0) * src_width;
+        const float *row1 = src + static_cast<size_t>(y1) * src_width;
+        float *output = dst + static_cast<size_t>(y) * dst_width;
 
         uint32_t x = 0;
 
@@ -60,7 +58,7 @@ inline void downsample_channel_simd(
 }
 
 // Downsample all three channels within the assigned rows.
-inline void downsample_means_simd(const MeanImage& src, const MeanImage& dst, uint32_t begin_row, uint32_t end_row)
+inline void downsample_means_simd(const MeanImage &src, const MeanImage &dst, uint32_t begin_row, uint32_t end_row)
 {
     downsample_channel_simd(src.r, dst.r, src.width, src.height, dst.width, begin_row, end_row);
     downsample_channel_simd(src.g, dst.g, src.width, src.height, dst.width, begin_row, end_row);

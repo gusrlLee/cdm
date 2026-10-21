@@ -32,10 +32,16 @@ namespace bc1
         return thresholds;
     }
 
+    template <uint32_t MaxValue> inline const std::array<float, MaxValue> &get_srgb_quantize_thresholds()
+    {
+        static const std::array<float, MaxValue> thresholds = make_srgb_quantize_thresholds<MaxValue>();
+        return thresholds;
+    }
+
     // Quantize a linear channel using cached sRGB thresholds.
     template <uint32_t MaxValue> inline uint32_t quantize_linear_channel(float value)
     {
-        static const std::array<float, MaxValue> thresholds = make_srgb_quantize_thresholds<MaxValue>();
+        const auto &thresholds = get_srgb_quantize_thresholds<MaxValue>();
         value = value < 0.0f ? 0.0f : (value > 1.0f ? 1.0f : value);
 
         const float *begin = thresholds.data();

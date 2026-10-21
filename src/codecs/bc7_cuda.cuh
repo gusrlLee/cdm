@@ -10,7 +10,7 @@ namespace bc7
     // Called once per CUDA context before launching BC7 work.
     inline cudaError_t upload_tables_cuda()
     {
-        const auto lut = make_mode6_quantization_lut();
+        const auto &lut = get_mode6_quantization_lut();
         cudaError_t result;
         result = cudaMemcpyToSymbol(g_srgb_to_linear, c_srgb_to_linear, sizeof(c_srgb_to_linear));
         if (result != cudaSuccess)

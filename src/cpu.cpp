@@ -18,6 +18,13 @@
 #include <memory>
 #include <new>
 
+void initialize_tables_cpu()
+{
+    (void)bc1::get_srgb_quantize_thresholds<31>();
+    (void)bc1::get_srgb_quantize_thresholds<63>();
+    (void)bc7::get_mode6_quantization_lut();
+}
+
 static void generate_mip_level_bc1(Image &img, uint32_t level, MeanImage mean_img, uint32_t begin_row, uint32_t end_row,
                                    bool use_simd)
 {

@@ -346,6 +346,12 @@ namespace bc7
         return table;
     }
 
+    inline const std::array<std::array<uint8_t, 2048>, 2> &get_mode6_quantization_lut()
+    {
+        static const auto table = make_mode6_quantization_lut();
+        return table;
+    }
+
     CDM_INLINE uint8_t interpolate_channel(uint8_t e0, uint8_t e1, uint32_t index, uint32_t index_bits)
     {
         assert(index_bits >= 2 && index_bits <= 4);
@@ -661,7 +667,7 @@ namespace bc7
         if (is_srgb)
         {
             // Build once, then use a direct lookup for each RGB channel.
-            static const auto table = make_mode6_quantization_lut();
+            const auto &table = get_mode6_quantization_lut();
 
             const uint32_t bucket = static_cast<uint32_t>(target * 2048.0f);
             const uint32_t index = bucket < 2048 ? bucket : 2047;

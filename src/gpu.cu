@@ -34,8 +34,8 @@ static bool initialize_color_tables()
     if (init)
         return true;
 
-    const std::array<float, 31> thresholds31 = bc1::make_srgb_quantize_thresholds<31>();
-    const std::array<float, 63> thresholds63 = bc1::make_srgb_quantize_thresholds<63>();
+    const auto &thresholds31 = bc1::get_srgb_quantize_thresholds<31>();
+    const auto &thresholds63 = bc1::get_srgb_quantize_thresholds<63>();
 
     if (!cuda_chk(cudaMemcpyToSymbol(g_srgb_to_linear, c_srgb_to_linear, sizeof(c_srgb_to_linear)),
                   "Upload sRGB table"))
@@ -61,6 +61,11 @@ static bool initialize_bc7_tables()
         initialized = cuda_chk(bc7::upload_tables_cuda(), "Upload BC7 tables");
     }
     return initialized;
+}
+
+bool initialize_tables_cuda()
+{
+    return initialize_color_tables() && initialize_bc7_tables();
 }
 
 struct CudaWorkspace
@@ -321,8 +326,11 @@ static __global__ void generate_extended_mean_mip(Means source, Block *destinati
     encode_half_warp(sample, color_mode, destination + output);
 }
 
-bool generate_mipmaps_cuda(Image &image)
+bool generate_mipmaps_cuda(Image &image, float *generation_time_ms)
 {
+    if (generation_time_ms)
+        *generation_time_ms = 0.0f;
+
     if (!image.data || image.mip_count == 0)
         return false;
     switch (image.format)
@@ -347,8 +355,7 @@ bool generate_mipmaps_cuda(Image &image)
 
     static CudaWorkspace workspace;
 
-    if ((image.format == Format::BC1 || image.format == Format::BC2 || image.format == Format::BC3) &&
-        !initialize_color_tables())
+    if ((image.format == Format::BC1 || image.format == Format::BC2 || image.format == Format::BC3) && !initialize_color_tables())
         return false;
 
     if (image.format == Format::BC7 && !initialize_bc7_tables())
@@ -609,7 +616,10 @@ bool generate_mipmaps_cuda(Image &image)
     if (!timed)
         return false;
 
-    std::printf("Total generation time (cuda): %.3f ms\n", generation_ms);
+    if (generation_time_ms)
+        *generation_time_ms = generation_ms;
+    else
+        std::printf("Total generation time (cuda): %.3f ms\n", generation_ms);
 
     // Wait for completion and copy the generated mip levels back.
     const size_t offset = image.mips[1].byte_offset;

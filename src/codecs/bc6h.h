@@ -228,11 +228,6 @@ namespace bc6h
         return unq;
     }
 
-    CDM_INLINE int interpolate(int a, int b, const int *weights, int index)
-    {
-        return (a * (64 - weights[index]) + b * weights[index] + 32) >> 6;
-    }
-
     CDM_INLINE uint16_t finish_unquantize(int val, int isSigned)
     {
         int s;
@@ -296,8 +291,7 @@ namespace bc6h
         bool valid;
     };
 
-    CDM_INLINE void parse_or_decode_half(const void *compressedBlock, void *decompressedBlock, int destinationPitch,
-                                         int isSigned, SymbolicBC6H *symbolic)
+    CDM_INLINE void parse_symbolic_half(const void *compressedBlock, int isSigned, SymbolicBC6H *symbolic)
     {
         constexpr uint8_t actual_bits_count[4][14] = {
             {10, 7, 11, 11, 11, 9, 8, 8, 8, 6, 10, 11, 12, 16}, /*  W */
@@ -344,16 +338,9 @@ namespace bc6h
             {{128, 0, 129, 1}, {1, 0, 0, 1}, {1, 0, 0, 1}, {1, 1, 0, 0}}  /* 31 */
         };
 
-        const int aWeight3[8] = {0, 9, 18, 27, 37, 46, 55, 64};
-        const int aWeight4[16] = {0, 4, 9, 13, 17, 21, 26, 30, 34, 38, 43, 47, 51, 55, 60, 64};
-
         BitStream bstream;
-        int mode, partition, numPartitions, i, j, partitionSet, indexBits, index, ep_i, actualBits0Mode;
+        int mode, partition, numPartitions, i, j, partitionSet, indexBits, index, actualBits0Mode;
         int r[4], g[4], b[4]; /* wxyz */
-        unsigned short *decompressed;
-        const int *weights;
-
-        decompressed = (unsigned short *)decompressedBlock;
 
         bstream.low = get_u64le(compressedBlock);
         bstream.high = get_u64le((const unsigned char *)compressedBlock + 8);
@@ -761,23 +748,7 @@ namespace bc6h
 
         default:
         {
-            /* Modes 10011, 10111, 11011, and 11111 (not shown) are reserved.
-               Do not use these in your encoder. If the hardware is passed blocks
-               with one of these modes specified, the resulting decompressed block
-               must contain all zeroes in all channels except for the alpha channel. */
-            if (!decompressed)
-                return;
-            for (i = 0; i < 4; ++i)
-            {
-                for (j = 0; j < 4; ++j)
-                {
-                    decompressed[j * 3 + 0] = 0;
-                    decompressed[j * 3 + 1] = 0;
-                    decompressed[j * 3 + 2] = 0;
-                }
-                decompressed += destinationPitch;
-            }
-
+            // Reserved modes leave the symbolic block invalid.
             return;
         }
         }
@@ -821,8 +792,6 @@ namespace bc6h
             b[i] = unquantize(b[i], actualBits0Mode, isSigned);
         }
 
-        weights = (mode >= 10) ? aWeight4 : aWeight3;
-        if (symbolic)
         {
             symbolic->valid = true;
             symbolic->selector_bits = uint8_t(mode >= 10 ? 4 : 3);
@@ -851,39 +820,19 @@ namespace bc6h
 
                 index = read_bits(&bstream, indexBits);
 
-                ep_i = partitionSet * 2;
-                if (symbolic)
                 {
                     const uint32_t texel = uint32_t(i * 4 + j);
                     symbolic->subset[texel] = uint8_t(partitionSet);
                     symbolic->selector[texel] = uint8_t(index);
                 }
-                else
-                {
-                    decompressed[j * 3 + 0] =
-                        finish_unquantize(interpolate(r[ep_i], r[ep_i + 1], weights, index), isSigned);
-                    decompressed[j * 3 + 1] =
-                        finish_unquantize(interpolate(g[ep_i], g[ep_i + 1], weights, index), isSigned);
-                    decompressed[j * 3 + 2] =
-                        finish_unquantize(interpolate(b[ep_i], b[ep_i + 1], weights, index), isSigned);
-                }
             }
-
-            if (!symbolic)
-                decompressed += destinationPitch;
         }
-    }
-
-    CDM_INLINE void decode_half(const void *compressedBlock, void *decompressedBlock, int destinationPitch,
-                                int isSigned)
-    {
-        parse_or_decode_half(compressedBlock, decompressedBlock, destinationPitch, isSigned, nullptr);
     }
 
     CDM_INLINE SymbolicBC6H parse_symbolic_block(const Block &block)
     {
         SymbolicBC6H result{};
-        parse_or_decode_half(&block, nullptr, 0, 0, &result);
+        parse_symbolic_half(&block, 0, &result);
         return result;
     }
 
@@ -914,61 +863,60 @@ namespace bc6h
         return uint16_t(sign | ((rounded - 0x38000000u) >> 13));
     }
 
-    CDM_INLINE void decode_block(const bc6h::Block &block, Float3 pixels[16])
-    {
-        uint16_t half[48];
-        decode_half(&block, half, 12, 0);
-        for (int i = 0; i < 16; ++i)
-            pixels[i] = {half_to_float(half[i * 3]), half_to_float(half[i * 3 + 1]), half_to_float(half[i * 3 + 2])};
-    }
-
     CDM_INLINE float sanitize_hdr(float value);
     CDM_INLINE Float3 sanitize_hdr(const Float3 &value);
 
-    CDM_INLINE void get_quadrant_means(const bc6h::Block &block, Float3 out[4], uint32_t valid_width = 4,
-                                       uint32_t valid_height = 4)
+    CDM_INLINE void get_quadrant_means(const bc6h::Block &block, Float3 out[4], uint32_t valid_width = 4, uint32_t valid_height = 4)
     {
-        const SymbolicBC6H symbolic = parse_symbolic_block(block);
-        for (uint32_t quadrant = 0; quadrant < 4; ++quadrant)
-            out[quadrant] = Float3{};
-        if (!symbolic.valid)
-            return;
-
-        struct HistogramEntry
+        for (uint32_t q = 0; q < 4; ++q)
         {
-            uint8_t key;
-            uint16_t quadrant_counts;
-        } histogram[16];
-
-        uint32_t entry_count = 0;
-        for (uint32_t texel = 0; texel < 16; ++texel)
-        {
-            const uint32_t quadrant = ((texel & 3u) >> 1) | (((texel >> 2) >> 1) << 1);
-            const uint32_t source_texel = valid_texel_index(texel, valid_width, valid_height);
-            const uint8_t key = uint8_t(symbolic.subset[source_texel] | (symbolic.selector[source_texel] << 1));
-            uint32_t entry = 0;
-            while (entry < entry_count && histogram[entry].key != key)
-                ++entry;
-            if (entry == entry_count)
-                histogram[entry_count++] = {key, 0};
-            histogram[entry].quadrant_counts += uint16_t(1u << (quadrant * 3));
+            out[q] = {};
         }
 
-        const int weights3[8] = {0, 9, 18, 27, 37, 46, 55, 64};
-        const int weights4[16] = {0, 4, 9, 13, 17, 21, 26, 30, 34, 38, 43, 47, 51, 55, 60, 64};
-        const int *weights = symbolic.selector_bits == 4 ? weights4 : weights3;
-        for (uint32_t entry = 0; entry < entry_count; ++entry)
+        const SymbolicBC6H symbolic = parse_symbolic_block(block);
+        if (!symbolic.valid)
         {
-            const uint32_t subset = histogram[entry].key & 1u;
-            const uint32_t selector = histogram[entry].key >> 1;
-            const int *a = symbolic.endpoints[subset * 2];
-            const int *b = symbolic.endpoints[subset * 2 + 1];
-            Float3 value = {half_to_float(finish_unquantize(interpolate(a[0], b[0], weights, selector), 0)),
-                            half_to_float(finish_unquantize(interpolate(a[1], b[1], weights, selector), 0)),
-                            half_to_float(finish_unquantize(interpolate(a[2], b[2], weights, selector), 0))};
-            value = sanitize_hdr(value);
-            for (uint32_t quadrant = 0; quadrant < 4; ++quadrant)
-                out[quadrant] += value * (float((histogram[entry].quadrant_counts >> (quadrant * 3)) & 7) * 0.25f);
+            return;
+        }
+
+        constexpr uint32_t weights3[8] = {0, 9, 18, 27, 37, 46, 55, 64};
+        constexpr uint32_t weights4[16] = {0, 4, 9, 13, 17, 21, 26, 30, 34, 38, 43, 47, 51, 55, 60, 64};
+        const uint32_t *weights = symbolic.selector_bits == 4 ? weights4 : weights3;
+
+        // [quadrant][subset][endpoint]
+        uint32_t sums[4][2][2] = {};
+
+        for (uint32_t texel = 0; texel < 16; ++texel)
+        {
+            const uint32_t quadrant = ((texel & 3u) >> 1) | ((texel >> 3) << 1);
+            const uint32_t source = valid_texel_index(texel, valid_width, valid_height);
+
+            const uint32_t subset = symbolic.subset[source];
+            const uint32_t weight = weights[symbolic.selector[source]];
+
+            sums[quadrant][subset][0] += 64u - weight;
+            sums[quadrant][subset][1] += weight;
+        }
+
+        const uint32_t subset_count = symbolic.selector_bits == 4 ? 1u : 2u;
+
+        for (uint32_t subset = 0; subset < subset_count; ++subset)
+        {
+            for (uint32_t endpoint = 0; endpoint < 2; ++endpoint)
+            {
+                const int *encoded = symbolic.endpoints[subset * 2 + endpoint];
+
+                const Float3 color = sanitize_hdr(Float3{
+                    half_to_float(finish_unquantize(encoded[0], 0)),
+                    half_to_float(finish_unquantize(encoded[1], 0)),
+                    half_to_float(finish_unquantize(encoded[2], 0))});
+
+                // shortcut: average HDR endpoints; differs from decoded-texel means.
+                for (uint32_t q = 0; q < 4; ++q)
+                {
+                    out[q] += color * (float(sums[q][subset][endpoint]) / 256.0f);
+                }
+            }
         }
     }
 

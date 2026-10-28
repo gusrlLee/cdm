@@ -80,12 +80,6 @@ namespace bc7
         uint8_t rotation = 0;
     };
 
-    struct HistogramEntry
-    {
-        uint16_t key;
-        uint8_t counts[4];
-    };
-
     static_assert(sizeof(Block) == 16, "A BC7 block must be 16 bytes");
 
     CDM_INLINE uint64_t get_bits(const Block &block, uint32_t bit, uint32_t count)
@@ -209,8 +203,7 @@ namespace bc7
                     {
                         for (uint32_t channel = 0; channel < channel_count; ++channel)
                         {
-                            out.endpoints[endpoint][channel] =
-                                static_cast<uint8_t>((out.endpoints[endpoint][channel] << 1) | pbit);
+                            out.endpoints[endpoint][channel] = static_cast<uint8_t>((out.endpoints[endpoint][channel] << 1) | pbit);
                         }
                     }
                 }
@@ -224,8 +217,7 @@ namespace bc7
 
                     for (uint32_t channel = 0; channel < channel_count; ++channel)
                     {
-                        out.endpoints[endpoint][channel] =
-                            static_cast<uint8_t>((out.endpoints[endpoint][channel] << 1) | pbit);
+                        out.endpoints[endpoint][channel] = static_cast<uint8_t>((out.endpoints[endpoint][channel] << 1) | pbit);
                     }
                 }
             }
@@ -245,8 +237,7 @@ namespace bc7
 
             if (alpha_bits != 0)
             {
-                const uint32_t value = static_cast<uint32_t>(out.endpoints[endpoint][3])
-                                       << (8 - alpha_endpoint_precision);
+                const uint32_t value = static_cast<uint32_t>(out.endpoints[endpoint][3]) << (8 - alpha_endpoint_precision);
                 out.endpoints[endpoint][3] = static_cast<uint8_t>(value | (value >> alpha_endpoint_precision));
             }
             else
@@ -362,40 +353,12 @@ namespace bc7
         constexpr uint8_t weights3[8] = {0, 9, 18, 27, 37, 46, 55, 64};
         constexpr uint8_t weights4[16] = {0, 4, 9, 13, 17, 21, 26, 30, 34, 38, 43, 47, 51, 55, 60, 64};
 #endif
-        const uint8_t *weights = index_bits == 2 ? weights2 : index_bits == 3 ? weights3 : weights4;
+        const uint8_t *weights = index_bits == 2 ? weights2 : index_bits == 3 ? weights3
+                                                                              : weights4;
         const uint32_t weight = weights[index];
 
         // BC7 uses integer weights and rounds before dividing by 64.
         return static_cast<uint8_t>(((64u - weight) * e0 + weight * e1 + 32u) >> 6);
-    }
-
-    CDM_INLINE void reconstruct_color(const SymbolicBlock &block, uint32_t subset, uint32_t color_index,
-                                      uint32_t alpha_index, uint8_t rgba[4])
-    {
-        assert(block.mode < 8);
-        assert(subset < block.subset_count);
-        assert(block.rotation <= 3);
-
-        const uint8_t *e0 = block.endpoints[subset * 2];
-        const uint8_t *e1 = block.endpoints[subset * 2 + 1];
-
-        for (uint32_t channel = 0; channel < 3; ++channel)
-        {
-            rgba[channel] = interpolate_channel(e0[channel], e1[channel], color_index, block.color_bits);
-        }
-
-        // Modes without a sperate alpha stream share the color index.
-        const bool seperate_alpha = block.alpha_bits != 0;
-        rgba[3] = interpolate_channel(e0[3], e1[3], seperate_alpha ? alpha_index : color_index,
-                                      seperate_alpha ? block.alpha_bits : block.color_bits);
-
-        if (block.rotation != 0)
-        {
-            const uint32_t channel = block.rotation - 1;
-            const uint32_t value = rgba[channel];
-            rgba[channel] = rgba[3];
-            rgba[3] = value;
-        }
     }
 
     CDM_INLINE Float4 rgba8_to_linear(const uint8_t rgba[4])
@@ -407,84 +370,74 @@ namespace bc7
         return {r, g, b, a};
     }
 
-    inline uint32_t build_quadrant_histogram(const SymbolicBlock &block, HistogramEntry entries[16],
-                                             uint32_t valid_width = 4, uint32_t valid_height = 4)
+    inline void get_quadrant_means(const Block &block, Float4 means[4], uint32_t valid_width = 4, uint32_t valid_height = 4)
     {
-        assert(block.mode < 8);
         assert(valid_width >= 1 && valid_width <= 4);
         assert(valid_height >= 1 && valid_height <= 4);
 
-        uint32_t entry_count = 0;
+        for (uint32_t q = 0; q < 4; ++q)
+            means[q] = {};
+
+        const SymbolicBlock symbolic = parse_symbolic_block(block);
+        if (symbolic.mode == 8)
+            return;
+
+        constexpr uint8_t weights2[4] = {0, 21, 43, 64};
+        constexpr uint8_t weights3[8] = {0, 9, 18, 27, 37, 46, 55, 64};
+        constexpr uint8_t weights4[16] = {0, 4, 9, 13, 17, 21, 26, 30, 34, 38, 43, 47, 51, 55, 60, 64};
+
+        const uint8_t *color_weights = symbolic.color_bits == 2 ? weights2 : symbolic.color_bits == 3 ? weights3 : weights4;
+        const bool separate_alpha = symbolic.alpha_bits != 0;
+        const uint8_t *alpha_weights = symbolic.alpha_bits == 3 ? weights3 : weights2;
+
+        // [quadrant][subset][stream: RGB=0, alpha=1][endpoint]
+        uint32_t sums[4][3][2][2] = {};
+
         for (uint32_t texel = 0; texel < 16; ++texel)
         {
             const uint32_t x = texel % 4;
             const uint32_t y = texel / 4;
             const uint32_t quadrant = (y / 2) * 2 + x / 2;
 
-            // Repeat the last valid texel at partial block edges.
             const uint32_t sx = x < valid_width ? x : valid_width - 1;
             const uint32_t sy = y < valid_height ? y : valid_height - 1;
             const uint32_t source = sy * 4 + sx;
 
-            const uint16_t key = static_cast<uint16_t>(block.subset[source] | (block.color_index[source] << 2) |
-                                                       (block.alpha_index[source] << 6));
-            uint32_t entry = 0;
+            const uint32_t subset = symbolic.subset[source];
+            const uint32_t color_weight = color_weights[symbolic.color_index[source]];
+            const uint32_t alpha_weight = separate_alpha ? alpha_weights[symbolic.alpha_index[source]] : color_weight;
 
-            while (entry < entry_count && entries[entry].key != key)
-            {
-                ++entry;
-            }
-
-            if (entry == entry_count)
-            {
-                entries[entry_count++] = {key, {}};
-            }
-            ++entries[entry].counts[quadrant];
+            sums[quadrant][subset][0][0] += 64u - color_weight;
+            sums[quadrant][subset][0][1] += color_weight;
+            
+            sums[quadrant][subset][1][0] += 64u - alpha_weight;
+            sums[quadrant][subset][1][1] += alpha_weight;
         }
 
-        return entry_count;
-    }
-
-    inline void get_quadrant_means(const Block &block, Float4 means[4], uint32_t valid_width = 4,
-                                   uint32_t valid_height = 4)
-    {
-        for (uint32_t quadrant = 0; quadrant < 4; ++quadrant)
+        for (uint32_t subset = 0; subset < symbolic.subset_count; ++subset)
         {
-            means[quadrant] = {};
-        }
-
-        const SymbolicBlock symbolic = parse_symbolic_block(block);
-
-        // Invalid mode prefixes decode to transparent block.
-        if (symbolic.mode == 8)
-        {
-            return;
-        }
-
-        HistogramEntry entries[16];
-        const uint32_t entry_count = build_quadrant_histogram(symbolic, entries, valid_width, valid_height);
-
-        for (uint32_t entry = 0; entry < entry_count; ++entry)
-        {
-            const uint16_t key = entries[entry].key;
-            const uint32_t subset = key & 3u;
-            const uint32_t color_index = (key >> 2) & 15u;
-            const uint32_t alpha_index = (key >> 6) & 15u;
-
-            // Reconstruct each unique combination once for all four quadrants.
-            uint8_t rgba[4];
-            reconstruct_color(symbolic, subset, color_index, alpha_index, rgba);
-
-            const Float4 color = rgba8_to_linear(rgba);
-
-            for (uint32_t quadrant = 0; quadrant < 4; ++quadrant)
+            for (uint32_t endpoint = 0; endpoint < 2; ++endpoint)
             {
-                const float weight = static_cast<float>(entries[entry].counts[quadrant]) * 0.25f;
+                const uint8_t *encoded = symbolic.endpoints[subset * 2 + endpoint];
+                uint8_t rgba[4] = {encoded[0], encoded[1], encoded[2], encoded[3]};
 
-                means[quadrant].r += color.r * weight;
-                means[quadrant].g += color.g * weight;
-                means[quadrant].b += color.b * weight;
-                means[quadrant].a += color.a * weight;
+                uint32_t streams[4] = {0, 0, 0, 1};
+                if (symbolic.rotation != 0)
+                {
+                    const uint32_t channel = symbolic.rotation - 1;
+                    std::swap(rgba[channel], rgba[3]);
+                    std::swap(streams[channel], streams[3]);
+                }
+
+                const Float4 color = rgba8_to_linear(rgba);
+
+                for (uint32_t q = 0; q < 4; ++q)
+                {
+                    means[q].r += color.r * (float(sums[q][subset][streams[0]][endpoint]) / 256.0f);
+                    means[q].g += color.g * (float(sums[q][subset][streams[1]][endpoint]) / 256.0f);
+                    means[q].b += color.b * (float(sums[q][subset][streams[2]][endpoint]) / 256.0f);
+                    means[q].a += color.a * (float(sums[q][subset][streams[3]][endpoint]) / 256.0f);
+                }
             }
         }
     }
@@ -1100,7 +1053,8 @@ namespace bc7
                                   const Float4 means[2], const Float4 axes[2], const float sample_projections[16])
     {
         const uint32_t subsets = mode == 6 ? 1 : 2;
-        const uint32_t palette_size = mode == 6 ? 16 : mode == 1 ? 8 : 4;
+        const uint32_t palette_size = mode == 6 ? 16 : mode == 1 ? 8
+                                                                 : 4;
         Float4 palette[2][16];
         make_palette(mode, quantized, pbits, palette);
 

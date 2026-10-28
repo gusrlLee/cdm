@@ -95,41 +95,82 @@ namespace bc7
         return stats;
     }
 
-    // Four-texel histogram avoids repeating reconstruction within one quadrant.
-    __device__ __forceinline__ Float4 device_quadrant_mean(const Block &block, uint32_t quadrant, uint32_t width,
-                                                           uint32_t height)
+    __device__ __forceinline__ Float4 device_quadrant_mean(const Block &block, uint32_t quadrant, uint32_t width, uint32_t height)
     {
         const SymbolicBlock symbolic = parse_symbolic_block(block);
         if (symbolic.mode == 8)
             return {};
-        uint16_t keys[4]{};
-        uint8_t counts[4]{};
-        uint32_t entries = 0;
-        for (uint32_t y = 0; y < 2; ++y)
+
+        constexpr uint8_t weights2[4] = {0, 21, 43, 64};
+        constexpr uint8_t weights3[8] = {0, 9, 18, 27, 37, 46, 55, 64};
+        constexpr uint8_t weights4[16] = {0, 4, 9, 13, 17, 21, 26, 30, 34, 38, 43, 47, 51, 55, 60, 64};
+
+        const uint8_t *color_weights = symbolic.color_bits == 2 ? weights2 : symbolic.color_bits == 3 ? weights3 : weights4;
+
+        const bool separate_alpha = symbolic.alpha_bits != 0;
+        const uint8_t *alpha_weights = symbolic.alpha_bits == 3 ? weights3 : weights2;
+        uint32_t sums[3][2][2] = {};
+
+        Float4 result{};
+
+        const uint32_t x0 = (quadrant & 1u) * 2;
+        const uint32_t y0 = (quadrant >> 1u) * 2;
+
+        for (uint32_t dy = 0; dy < 2; ++dy)
         {
-            for (uint32_t x = 0; x < 2; ++x)
+            for (uint32_t dx = 0; dx < 2; ++dx)
             {
-                const uint32_t sx = min((quadrant & 1u) * 2 + x, width - 1);
-                const uint32_t sy = min((quadrant >> 1u) * 2 + y, height - 1);
-                const uint32_t t = sy * 4 + sx;
-                const uint16_t key =
-                    symbolic.subset[t] | (symbolic.color_index[t] << 2) | (symbolic.alpha_index[t] << 6);
-                uint32_t entry = 0;
-                while (entry < entries && keys[entry] != key)
-                    ++entry;
-                if (entry == entries)
-                    keys[entries++] = key;
-                ++counts[entry];
+                const uint32_t sx = min(x0 + dx, width - 1);
+                const uint32_t sy = min(y0 + dy, height - 1);
+                const uint32_t source = sy * 4 + sx;
+
+                const uint32_t subset = symbolic.subset[source];
+
+                const uint32_t color_weight = color_weights[symbolic.color_index[source]];
+
+                const uint32_t alpha_weight = separate_alpha ? alpha_weights[symbolic.alpha_index[source]] : color_weight;
+
+                sums[subset][0][0] += 64u - color_weight;
+                sums[subset][0][1] += color_weight;
+
+                sums[subset][1][0] += 64u - alpha_weight;
+                sums[subset][1][1] += alpha_weight;
             }
         }
-        Float4 result{};
-        for (uint32_t entry = 0; entry < entries; ++entry)
+
+        for (uint32_t subset = 0; subset < symbolic.subset_count; ++subset)
         {
-            const uint16_t key = keys[entry];
-            uint8_t rgba[4];
-            reconstruct_color(symbolic, key & 3u, (key >> 2) & 15u, (key >> 6) & 15u, rgba);
-            result = result + rgba8_to_linear(rgba) * (counts[entry] * 0.25f);
+            for (uint32_t endpoint = 0; endpoint < 2; ++endpoint)
+            {
+                const uint8_t *encoded = symbolic.endpoints[subset * 2 + endpoint];
+
+                uint8_t rgba[4] = {encoded[0], encoded[1], encoded[2], encoded[3]};
+
+                uint32_t streams[4] = {0, 0, 0, 1};
+
+                if (symbolic.rotation != 0)
+                {
+                    const uint32_t channel = symbolic.rotation - 1;
+
+                    const uint8_t value = rgba[channel];
+                    rgba[channel] = rgba[3];
+                    rgba[3] = value;
+
+                    const uint32_t stream = streams[channel];
+                    streams[channel] = streams[3];
+                    streams[3] = stream;
+                }
+
+                const Float4 color = rgba8_to_linear(rgba);
+
+                // shortcut: average linear endpoints; revisit if quality is insufficient.
+                result.r += color.r * (float(sums[subset][streams[0]][endpoint]) / 256.0f);
+                result.g += color.g * (float(sums[subset][streams[1]][endpoint]) / 256.0f);
+                result.b += color.b * (float(sums[subset][streams[2]][endpoint]) / 256.0f);
+                result.a += color.a * (float(sums[subset][streams[3]][endpoint]) / 256.0f);
+            }
         }
+
         return result;
     }
 
@@ -174,7 +215,8 @@ namespace bc7
             mode = __shfl_sync(mask, mode, 0, 16);
         }
         const uint32_t subsets = mode == 6 ? 1 : 2;
-        const uint32_t bits = mode == 6 ? 4 : mode == 1 ? 3 : 2;
+        const uint32_t bits = mode == 6 ? 4 : mode == 1 ? 3
+                                                        : 2;
         const uint32_t size = 1u << bits;
         uint8_t quantized[4][4]{};
         uint8_t pbits[4]{};

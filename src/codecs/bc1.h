@@ -14,7 +14,8 @@ namespace bc1
     // Map quadrant-grouped samples to row-major texel positions.
     constexpr uint8_t texel_map[16] = {0, 1, 4, 5, 2, 3, 6, 7, 8, 9, 12, 13, 10, 11, 14, 15};
 
-    template <uint32_t MaxValue> inline std::array<float, MaxValue> make_srgb_quantize_thresholds()
+    template <uint32_t MaxValue>
+    inline std::array<float, MaxValue> make_srgb_quantize_thresholds()
     {
         constexpr uint32_t bits = MaxValue == 31 ? 5 : 6;
         std::array<float, MaxValue> thresholds{};
@@ -32,14 +33,16 @@ namespace bc1
         return thresholds;
     }
 
-    template <uint32_t MaxValue> inline const std::array<float, MaxValue> &get_srgb_quantize_thresholds()
+    template <uint32_t MaxValue>
+    inline const std::array<float, MaxValue> &get_srgb_quantize_thresholds()
     {
         static const std::array<float, MaxValue> thresholds = make_srgb_quantize_thresholds<MaxValue>();
         return thresholds;
     }
 
     // Quantize a linear channel using cached sRGB thresholds.
-    template <uint32_t MaxValue> inline uint32_t quantize_linear_channel(float value)
+    template <uint32_t MaxValue>
+    inline uint32_t quantize_linear_channel(float value)
     {
         const auto &thresholds = get_srgb_quantize_thresholds<MaxValue>();
         value = value < 0.0f ? 0.0f : (value > 1.0f ? 1.0f : value);
@@ -196,19 +199,28 @@ namespace bc1
             return;
         }
 
-        // Sample edge blocks with coordinates clamped to valid texels.
+        // Count selectors with coordinates clamped to valid texels.
         for (uint32_t quadrant = 0; quadrant < 4; ++quadrant)
         {
             const uint32_t x = (quadrant & 1u) * 2u;
             const uint32_t y = (quadrant >> 1u) * 2u;
 
-            const Float3 ll = sample_texel(block, palette, x, y, valid_width, valid_height);
-            const Float3 lr = sample_texel(block, palette, x + 1, y, valid_width, valid_height);
-            const Float3 rl = sample_texel(block, palette, x, y + 1, valid_width, valid_height);
-            const Float3 rr = sample_texel(block, palette, x + 1, y + 1, valid_width, valid_height);
+            uint32_t counts[4] = {};
+            for (uint32_t dy = 0; dy < 2; ++dy)
+            {
+                for (uint32_t dx = 0; dx < 2; ++dx)
+                {
+                    const uint32_t sx = std::min(x + dx, valid_width - 1);
+                    const uint32_t sy = std::min(y + dy, valid_height - 1);
+                    ++counts[get_selector(block, sx, sy)];
+                }
+            }
 
-            // Average the four samples in the same order as the prototype.
-            means[quadrant] = (ll + lr + rl + rr) * 0.25f;
+            means[quadrant] = {};
+            for (uint32_t selector = 0; selector < 4; ++selector)
+            {
+                means[quadrant] += palette[selector] * (static_cast<float>(counts[selector]) * 0.25f);
+            }
         }
     }
 

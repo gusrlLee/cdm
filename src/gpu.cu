@@ -98,9 +98,9 @@ static MeanImage device_mean_view(float *data, size_t channel_capacity, uint32_t
     return {data, data + channel_capacity, data + channel_capacity * 2, width, height};
 }
 
-// For ablation study
-static constexpr bool bc1_use_histogram = false;
-static constexpr bool bc1_use_mean_pyramid = false;
+// For ablation study, if we choose true about two options, we can use two methods of mipmap generation.
+static constexpr bool bc1_use_histogram = true;
+static constexpr bool bc1_use_mean_pyramid = true;
 
 // Generate mip 1 and store the means needed by later levels.
 static __global__ void generate_base_mip(const bc1::Block *source, MipLevel source_level, bc1::Block *destination,

@@ -370,6 +370,35 @@ namespace bc7
         return {r, g, b, a};
     }
 
+    CDM_INLINE Float4 input_palette_color(const SymbolicBlock &symbolic, uint32_t subset, uint32_t stream,
+                                         uint32_t index)
+    {
+        const uint8_t *endpoint0 = symbolic.endpoints[subset * 2];
+        const uint8_t *endpoint1 = symbolic.endpoints[subset * 2 + 1];
+        uint8_t rgba[4] = {};
+        if (stream == 0)
+        {
+            for (uint32_t channel = 0; channel < 3; ++channel)
+                rgba[channel] = interpolate_channel(endpoint0[channel], endpoint1[channel], index, symbolic.color_bits);
+            if (symbolic.alpha_bits == 0)
+                rgba[3] = interpolate_channel(endpoint0[3], endpoint1[3], index, symbolic.color_bits);
+        }
+        else
+        {
+            rgba[3] = interpolate_channel(endpoint0[3], endpoint1[3], index, symbolic.alpha_bits);
+        }
+
+        // Separate streams contribute disjoint channels after rotation as well.
+        if (symbolic.rotation != 0)
+        {
+            const uint32_t channel = symbolic.rotation - 1;
+            const uint8_t value = rgba[channel];
+            rgba[channel] = rgba[3];
+            rgba[3] = value;
+        }
+        return rgba8_to_linear(rgba);
+    }
+
     inline void get_quadrant_means(const Block &block, Float4 means[4], uint32_t valid_width = 4, uint32_t valid_height = 4)
     {
         assert(valid_width >= 1 && valid_width <= 4);
@@ -382,16 +411,10 @@ namespace bc7
         if (symbolic.mode == 8)
             return;
 
-        constexpr uint8_t weights2[4] = {0, 21, 43, 64};
-        constexpr uint8_t weights3[8] = {0, 9, 18, 27, 37, 46, 55, 64};
-        constexpr uint8_t weights4[16] = {0, 4, 9, 13, 17, 21, 26, 30, 34, 38, 43, 47, 51, 55, 60, 64};
-
-        const uint8_t *color_weights = symbolic.color_bits == 2 ? weights2 : symbolic.color_bits == 3 ? weights3 : weights4;
         const bool separate_alpha = symbolic.alpha_bits != 0;
-        const uint8_t *alpha_weights = symbolic.alpha_bits == 3 ? weights3 : weights2;
 
-        // [quadrant][subset][stream: RGB=0, alpha=1][endpoint]
-        uint32_t sums[4][3][2][2] = {};
+        // [quadrant][subset][stream: RGB=0, alpha=1][selector]
+        uint32_t counts[4][3][2][16] = {};
 
         for (uint32_t texel = 0; texel < 16; ++texel)
         {
@@ -404,39 +427,28 @@ namespace bc7
             const uint32_t source = sy * 4 + sx;
 
             const uint32_t subset = symbolic.subset[source];
-            const uint32_t color_weight = color_weights[symbolic.color_index[source]];
-            const uint32_t alpha_weight = separate_alpha ? alpha_weights[symbolic.alpha_index[source]] : color_weight;
-
-            sums[quadrant][subset][0][0] += 64u - color_weight;
-            sums[quadrant][subset][0][1] += color_weight;
-            
-            sums[quadrant][subset][1][0] += 64u - alpha_weight;
-            sums[quadrant][subset][1][1] += alpha_weight;
+            ++counts[quadrant][subset][0][symbolic.color_index[source]];
+            if (separate_alpha)
+                ++counts[quadrant][subset][1][symbolic.alpha_index[source]];
         }
 
         for (uint32_t subset = 0; subset < symbolic.subset_count; ++subset)
         {
-            for (uint32_t endpoint = 0; endpoint < 2; ++endpoint)
+            const uint32_t stream_count = separate_alpha ? 2u : 1u;
+            for (uint32_t stream = 0; stream < stream_count; ++stream)
             {
-                const uint8_t *encoded = symbolic.endpoints[subset * 2 + endpoint];
-                uint8_t rgba[4] = {encoded[0], encoded[1], encoded[2], encoded[3]};
-
-                uint32_t streams[4] = {0, 0, 0, 1};
-                if (symbolic.rotation != 0)
+                const uint32_t bits = stream == 0 ? symbolic.color_bits : symbolic.alpha_bits;
+                for (uint32_t index = 0; index < (1u << bits); ++index)
                 {
-                    const uint32_t channel = symbolic.rotation - 1;
-                    std::swap(rgba[channel], rgba[3]);
-                    std::swap(streams[channel], streams[3]);
-                }
+                    uint32_t total = 0;
+                    for (uint32_t q = 0; q < 4; ++q)
+                        total += counts[q][subset][stream][index];
+                    if (total == 0)
+                        continue;
 
-                const Float4 color = rgba8_to_linear(rgba);
-
-                for (uint32_t q = 0; q < 4; ++q)
-                {
-                    means[q].r += color.r * (float(sums[q][subset][streams[0]][endpoint]) / 256.0f);
-                    means[q].g += color.g * (float(sums[q][subset][streams[1]][endpoint]) / 256.0f);
-                    means[q].b += color.b * (float(sums[q][subset][streams[2]][endpoint]) / 256.0f);
-                    means[q].a += color.a * (float(sums[q][subset][streams[3]][endpoint]) / 256.0f);
+                    const Float4 color = input_palette_color(symbolic, subset, stream, index);
+                    for (uint32_t q = 0; q < 4; ++q)
+                        means[q] = means[q] + color * (static_cast<float>(counts[q][subset][stream][index]) * 0.25f);
                 }
             }
         }

@@ -101,15 +101,8 @@ namespace bc7
         if (symbolic.mode == 8)
             return {};
 
-        constexpr uint8_t weights2[4] = {0, 21, 43, 64};
-        constexpr uint8_t weights3[8] = {0, 9, 18, 27, 37, 46, 55, 64};
-        constexpr uint8_t weights4[16] = {0, 4, 9, 13, 17, 21, 26, 30, 34, 38, 43, 47, 51, 55, 60, 64};
-
-        const uint8_t *color_weights = symbolic.color_bits == 2 ? weights2 : symbolic.color_bits == 3 ? weights3 : weights4;
-
         const bool separate_alpha = symbolic.alpha_bits != 0;
-        const uint8_t *alpha_weights = symbolic.alpha_bits == 3 ? weights3 : weights2;
-        uint32_t sums[3][2][2] = {};
+        uint32_t counts[3][2][16] = {};
 
         Float4 result{};
 
@@ -126,48 +119,26 @@ namespace bc7
 
                 const uint32_t subset = symbolic.subset[source];
 
-                const uint32_t color_weight = color_weights[symbolic.color_index[source]];
-
-                const uint32_t alpha_weight = separate_alpha ? alpha_weights[symbolic.alpha_index[source]] : color_weight;
-
-                sums[subset][0][0] += 64u - color_weight;
-                sums[subset][0][1] += color_weight;
-
-                sums[subset][1][0] += 64u - alpha_weight;
-                sums[subset][1][1] += alpha_weight;
+                ++counts[subset][0][symbolic.color_index[source]];
+                if (separate_alpha)
+                    ++counts[subset][1][symbolic.alpha_index[source]];
             }
         }
 
         for (uint32_t subset = 0; subset < symbolic.subset_count; ++subset)
         {
-            for (uint32_t endpoint = 0; endpoint < 2; ++endpoint)
+            const uint32_t stream_count = separate_alpha ? 2u : 1u;
+            for (uint32_t stream = 0; stream < stream_count; ++stream)
             {
-                const uint8_t *encoded = symbolic.endpoints[subset * 2 + endpoint];
-
-                uint8_t rgba[4] = {encoded[0], encoded[1], encoded[2], encoded[3]};
-
-                uint32_t streams[4] = {0, 0, 0, 1};
-
-                if (symbolic.rotation != 0)
+                const uint32_t bits = stream == 0 ? symbolic.color_bits : symbolic.alpha_bits;
+                for (uint32_t index = 0; index < (1u << bits); ++index)
                 {
-                    const uint32_t channel = symbolic.rotation - 1;
-
-                    const uint8_t value = rgba[channel];
-                    rgba[channel] = rgba[3];
-                    rgba[3] = value;
-
-                    const uint32_t stream = streams[channel];
-                    streams[channel] = streams[3];
-                    streams[3] = stream;
+                    const uint32_t count = counts[subset][stream][index];
+                    if (count == 0)
+                        continue;
+                    const Float4 color = input_palette_color(symbolic, subset, stream, index);
+                    result = result + color * (static_cast<float>(count) * 0.25f);
                 }
-
-                const Float4 color = rgba8_to_linear(rgba);
-
-                // shortcut: average linear endpoints; revisit if quality is insufficient.
-                result.r += color.r * (float(sums[subset][streams[0]][endpoint]) / 256.0f);
-                result.g += color.g * (float(sums[subset][streams[1]][endpoint]) / 256.0f);
-                result.b += color.b * (float(sums[subset][streams[2]][endpoint]) / 256.0f);
-                result.a += color.a * (float(sums[subset][streams[3]][endpoint]) / 256.0f);
             }
         }
 

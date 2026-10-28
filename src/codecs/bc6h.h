@@ -866,8 +866,7 @@ namespace bc6h
     CDM_INLINE float sanitize_hdr(float value);
     CDM_INLINE Float3 sanitize_hdr(const Float3 &value);
 
-    CDM_INLINE void get_quadrant_means(const bc6h::Block &block, Float3 out[4], uint32_t valid_width = 4, uint32_t valid_height = 4)
-    {
+    CDM_INLINE void get_quadrant_means(const bc6h::Block &block, Float3 out[4], uint32_t valid_width = 4, uint32_t valid_height = 4){
         for (uint32_t q = 0; q < 4; ++q)
         {
             out[q] = {};
@@ -883,8 +882,8 @@ namespace bc6h
         constexpr uint32_t weights4[16] = {0, 4, 9, 13, 17, 21, 26, 30, 34, 38, 43, 47, 51, 55, 60, 64};
         const uint32_t *weights = symbolic.selector_bits == 4 ? weights4 : weights3;
 
-        // [quadrant][subset][endpoint]
-        uint32_t sums[4][2][2] = {};
+        // [quadrant][subset][selector]
+        uint32_t counts[4][2][16] = {};
 
         for (uint32_t texel = 0; texel < 16; ++texel)
         {
@@ -892,29 +891,49 @@ namespace bc6h
             const uint32_t source = valid_texel_index(texel, valid_width, valid_height);
 
             const uint32_t subset = symbolic.subset[source];
-            const uint32_t weight = weights[symbolic.selector[source]];
+            const uint32_t selector = symbolic.selector[source];
 
-            sums[quadrant][subset][0] += 64u - weight;
-            sums[quadrant][subset][1] += weight;
+            ++counts[quadrant][subset][selector];
         }
 
         const uint32_t subset_count = symbolic.selector_bits == 4 ? 1u : 2u;
+        const uint32_t selector_count = 1u << symbolic.selector_bits;
 
         for (uint32_t subset = 0; subset < subset_count; ++subset)
         {
-            for (uint32_t endpoint = 0; endpoint < 2; ++endpoint)
+            const int *endpoint0 = symbolic.endpoints[subset * 2];
+            const int *endpoint1 = symbolic.endpoints[subset * 2 + 1];
+
+            for (uint32_t selector = 0; selector < selector_count; ++selector)
             {
-                const int *encoded = symbolic.endpoints[subset * 2 + endpoint];
-
-                const Float3 color = sanitize_hdr(Float3{
-                    half_to_float(finish_unquantize(encoded[0], 0)),
-                    half_to_float(finish_unquantize(encoded[1], 0)),
-                    half_to_float(finish_unquantize(encoded[2], 0))});
-
-                // shortcut: average HDR endpoints; differs from decoded-texel means.
+                uint32_t total = 0;
                 for (uint32_t q = 0; q < 4; ++q)
                 {
-                    out[q] += color * (float(sums[q][subset][endpoint]) / 256.0f);
+                    total += counts[q][subset][selector];
+                }
+
+                if (total == 0)
+                {
+                    continue;
+                }
+
+                const int weight = static_cast<int>(weights[selector]);
+
+                const int r = (endpoint0[0] * (64 - weight) + endpoint1[0] * weight + 32) >> 6;
+                const int g = (endpoint0[1] * (64 - weight) + endpoint1[1] * weight + 32) >> 6;
+                const int b = (endpoint0[2] * (64 - weight) + endpoint1[2] * weight + 32) >> 6;
+
+                // Interpolate integers before interpreting the result as half float.
+                const Float3 color = {
+                    half_to_float(finish_unquantize(r, 0)),
+                    half_to_float(finish_unquantize(g, 0)),
+                    half_to_float(finish_unquantize(b, 0))
+                };
+
+                for (uint32_t q = 0; q < 4; ++q)
+                {
+                    const float weight = static_cast<float>(counts[q][subset][selector]) * 0.25f;
+                    out[q] += color * weight;
                 }
             }
         }

@@ -61,6 +61,45 @@ namespace bc1
         return mean;
     }
 
+    // Reconstruct four texel colors per lane, then average the quadrant.
+    __device__ __forceinline__ Float3 device_quadrant_mean_texels(const Block &block, uint32_t quadrant, bool is_srgb, uint32_t valid_width = 4, uint32_t valid_height = 4)
+    {
+        const unsigned mask = half_warp_mask();
+        const uint32_t group_start = (threadIdx.x & 15u) & ~3u;
+
+        // Four lanes share the four linear palette colors.
+        const Float3 owned = device_palette_color(block.c0, block.c1, quadrant, is_srgb);
+
+        const uint32_t x0 = (quadrant & 1u) * 2u;
+        const uint32_t y0 = (quadrant >> 1u) * 2u;
+
+        Float3 sum{};
+        for (uint32_t dy = 0; dy < 2; ++dy)
+        {
+            for (uint32_t dx = 0; dx < 2; ++dx)
+            {
+                const uint32_t x = x0 + dx;
+                const uint32_t y = y0 + dy;
+                const uint32_t sx = x < valid_width ? x : valid_width - 1;
+                const uint32_t sy = y < valid_height ? y : valid_height - 1;
+
+                const uint32_t texel = sy * 4 + sx;
+                const uint32_t selector = (block.indices >> (texel * 2u)) & 3u;
+
+                const uint32_t source_lane = group_start + selector;
+                const Float3 color = {
+                    __shfl_sync(mask, owned.r, source_lane, 16),
+                    __shfl_sync(mask, owned.g, source_lane, 16),
+                    __shfl_sync(mask, owned.b, source_lane, 16)
+                };
+
+                sum += color;
+            }
+        }
+
+        return sum * 0.25f;
+    }
+
     // Match the CPU upper-bound search for sRGB quantization.
     template <uint32_t MaxValue> __device__ __forceinline__ uint32_t device_quantize_channel(float value)
     {

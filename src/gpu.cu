@@ -98,6 +98,10 @@ static MeanImage device_mean_view(float *data, size_t channel_capacity, uint32_t
     return {data, data + channel_capacity, data + channel_capacity * 2, width, height};
 }
 
+// For ablation study
+static constexpr bool bc1_use_histogram = false;
+static constexpr bool bc1_use_mean_pyramid = false;
+
 // Generate mip 1 and store the means needed by later levels.
 static __global__ void generate_base_mip(const bc1::Block *source, MipLevel source_level, bc1::Block *destination,
                                          MipLevel destination_level, MeanImage means, bool is_srgb)
@@ -134,7 +138,15 @@ static __global__ void generate_base_mip(const bc1::Block *source, MipLevel sour
 
     const size_t source_index = static_cast<size_t>(sy) * source_level.block_count_x + sx;
 
-    Float3 sample = bc1::device_quadrant_mean(source[source_index], quadrant, is_srgb, source_width, source_height);
+    Float3 sample{};
+    if (bc1_use_histogram)
+    {
+        sample = bc1::device_quadrant_mean(source[source_index], quadrant, is_srgb, source_width, source_height);
+    }
+    else 
+    {
+        sample = bc1::device_quadrant_mean_texels(source[source_index], quadrant, is_srgb, source_width, source_height);
+    }
 
     const uint32_t remaining_x = destination_level.width - bx * 4;
     const uint32_t remaining_y = destination_level.height - by * 4;
@@ -143,16 +155,17 @@ static __global__ void generate_base_mip(const bc1::Block *source, MipLevel sour
 
     if (valid_width < 4 || valid_height < 4)
         sample = bc1::repeat_small_sample(sample, valid_width, valid_height);
-
-    const Float3 parent_mean = {sum4(sample.r, mask) * 0.25f, sum4(sample.g, mask) * 0.25f,
-                                sum4(sample.b, mask) * 0.25f};
-
-    // Avoid duplicate writes when parent coordinates are clamped.
-    const bool unique_parent =
-        parent == 0 || (parent == 1 && x1 != x0) || (parent == 2 && y1 != y0) || (parent == 3 && x1 != x0 && y1 != y0);
-
-    if (quadrant == 0 && unique_parent)
-        means.set(sx, sy, parent_mean);
+    if (means.r != nullptr)
+    {
+        const Float3 parent_mean = {sum4(sample.r, mask) * 0.25f, sum4(sample.g, mask) * 0.25f, sum4(sample.b, mask) * 0.25f};
+    
+        // Avoid duplicate writes when parent coordinates are clamped.
+        const bool unique_parent =
+            parent == 0 || (parent == 1 && x1 != x0) || (parent == 2 && y1 != y0) || (parent == 3 && x1 != x0 && y1 != y0);
+    
+        if (quadrant == 0 && unique_parent)
+            means.set(sx, sy, parent_mean);
+    }
 
     bc1::encode_half_warp(sample, is_srgb, destination + output);
 }
@@ -426,6 +439,25 @@ bool generate_mipmaps_cuda(Image &image, float *generation_time_ms)
         const MipLevel &current = image.mips[level];
         const uint32_t block_count = current.block_count_x * current.block_count_y;
         const uint32_t groups = (block_count + blocks_per_group - 1) / blocks_per_group;
+
+        if (image.format == Format::BC1 && !bc1_use_mean_pyramid)
+        {
+            const MipLevel &previous = image.mips[level - 1];
+
+            const auto *source = reinterpret_cast<const bc1::Block *>(device_data + previous.byte_offset);
+            auto *destination = reinterpret_cast<bc1::Block *>(device_data + current.byte_offset);
+
+            generate_base_mip<<<groups, threads>>>(source, previous, destination, current, MeanImage{}, image.is_srgb);
+
+            if (!cuda_chk(cudaGetLastError(), "Launch BC1 ablation kernel"))
+            {
+                cudaEventDestroy(end);
+                cudaEventDestroy(start);
+                return false;
+            }
+
+            continue;
+        }
 
         if (image.format == Format::BC2 || image.format == Format::BC3)
         {

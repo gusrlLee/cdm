@@ -86,10 +86,16 @@ namespace bc6h
         degenerate = __shfl_sync(mask, degenerate, 0, 16);
         if (degenerate)
             p0 = p1 = mean;
+
+        const Float3 sample_min = {min16(sample.r, mask), min16(sample.g, mask), min16(sample.b, mask)};
         
         uint32_t endpoints[2][3] = {};
         if (lane == 0)
         {
+            // Keep negative PCA components from introducing a zero HDR endpoint.
+            if (p0.r < 0.0f) p0.r = sample_min.r;
+            if (p0.g < 0.0f) p0.g = sample_min.g;
+            if (p0.b < 0.0f) p0.b = sample_min.b;
             endpoints[0][0] = quantize_endpoint(p0.r);
             endpoints[0][1] = quantize_endpoint(p0.g);
             endpoints[0][2] = quantize_endpoint(p0.b);
@@ -118,6 +124,43 @@ namespace bc6h
             }
         }
         
+        const float b = weight4(selector) * (1.0f / 64.0f);
+        const float a = 1.0f - b;
+        const float aa = sum16(a * a, mask);
+        const float ab = sum16(a * b, mask);
+        const float bb = sum16(b * b, mask);
+        const float values[3] = {sample.r, sample.g, sample.b};
+        float ay[3], by[3];
+        for (int c = 0; c < 3; ++c)
+        {
+            const float y = float(float_to_half(values[c]));
+            ay[c] = sum16(a * y, mask);
+            by[c] = sum16(b * y, mask);
+        }
+        bool refitted = false;
+        if (lane == 0)
+            refitted = refit_endpoints(aa, ab, bb, ay, by, endpoints);
+        refitted = __shfl_sync(mask, refitted, 0, 16);
+        if (refitted)
+        {
+            for (int e = 0; e < 2; ++e)
+                for (int c = 0; c < 3; ++c)
+                    endpoints[e][c] = __shfl_sync(mask, endpoints[e][c], 0, 16);
+            const float fitted_projection = dot(palette_color(endpoints, lane) - mean, axis);
+            best = 1e30f;
+            selector = 0;
+            for (uint32_t s = 0; s < 16; ++s)
+            {
+                const float delta = projection - __shfl_sync(mask, fitted_projection, s, 16);
+                const float error = delta * delta;
+                if (error < best)
+                {
+                    best = error;
+                    selector = s;
+                }
+            }
+        }
+
         const bool reverse = __shfl_sync(mask, selector >= 8, 0, 16);
         if (reverse)
         {

@@ -24,10 +24,14 @@ namespace bc6h
         const Float3x4 estimated_axis = compute_principal_axis(covariance);
         const __m128 inverse_length = _mm_div_ps(_mm_set1_ps(1.0f), _mm_sqrt_ps(length_sq(estimated_axis)));
         const Float3x4 axis = estimated_axis * inverse_length;
+        Float3x4 sample_min = clean[0];
         __m128 projections[16];
         __m128 minimum = _mm_set1_ps(1e30f), maximum = _mm_set1_ps(-1e30f);
         for (uint32_t i = 0; i < 16; ++i)
         {
+            sample_min.r = _mm_min_ps(sample_min.r, clean[i].r);
+            sample_min.g = _mm_min_ps(sample_min.g, clean[i].g);
+            sample_min.b = _mm_min_ps(sample_min.b, clean[i].b);
             projections[i] = dot(clean[i] - mean, axis);
             minimum = _mm_min_ps(minimum, projections[i]);
             maximum = _mm_max_ps(maximum, projections[i]);
@@ -36,8 +40,13 @@ namespace bc6h
         const __m128 threshold = _mm_mul_ps(_mm_mul_ps(scale, scale), _mm_set1_ps(1e-12f));
         const __m128 variance = _mm_add_ps(_mm_add_ps(covariance.rr, covariance.gg), covariance.bb);
         const __m128 flat = _mm_cmple_ps(variance, threshold);
-        const Float3x4 low = select(mean + axis * minimum, mean, flat);
+        Float3x4 low = select(mean + axis * minimum, mean, flat);
         const Float3x4 high = select(mean + axis * maximum, mean, flat);
+        // Keep negative PCA components from introducing a zero HDR endpoint.
+        const __m128 zero = _mm_setzero_ps();
+        low.r = _mm_blendv_ps(low.r, sample_min.r, _mm_cmplt_ps(low.r, zero));
+        low.g = _mm_blendv_ps(low.g, sample_min.g, _mm_cmplt_ps(low.g, zero));
+        low.b = _mm_blendv_ps(low.b, sample_min.b, _mm_cmplt_ps(low.b, zero));
         alignas(16) float values[2][3][4], means[3][4], axes[3][4];
         _mm_store_ps(values[0][0], low.r);
         _mm_store_ps(values[0][1], low.g);
@@ -81,7 +90,27 @@ namespace bc6h
             for (uint32_t lane = 0; lane < 4; ++lane)
                 selectors[lane][texel_index(i)] = indices[lane];
         }
+        alignas(16) float colors[16][3][4], projected[16][4];
+        for (uint32_t i = 0; i < 16; ++i)
+        {
+            _mm_store_ps(colors[i][0], clean[i].r);
+            _mm_store_ps(colors[i][1], clean[i].g);
+            _mm_store_ps(colors[i][2], clean[i].b);
+            _mm_store_ps(projected[i], projections[i]);
+        }
         for (uint32_t lane = 0; lane < 4; ++lane)
+        {
+            Float3 lane_clean[16];
+            float lane_projections[16];
+            for (uint32_t i = 0; i < 16; ++i)
+            {
+                lane_clean[i] = {colors[i][0][lane], colors[i][1][lane], colors[i][2][lane]};
+                lane_projections[i] = projected[i][lane];
+            }
+            const Float3 lane_mean = {means[0][lane], means[1][lane], means[2][lane]};
+            const Float3 lane_axis = {axes[0][lane], axes[1][lane], axes[2][lane]};
+            refit_samples(lane_clean, lane_mean, lane_axis, lane_projections, endpoints[lane], selectors[lane]);
             output[lane] = pack_mode11(endpoints[lane], selectors[lane]);
+        }
     }
 }

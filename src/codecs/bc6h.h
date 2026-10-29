@@ -1038,41 +1038,121 @@ namespace bc6h
         return {low, high};
     }
 
+    CDM_INLINE bool refit_endpoints(float aa, float ab, float bb, const float ay[3], const float by[3], uint32_t endpoint[2][3])
+    {
+        const float determinant = aa * bb - ab * ab;
+        if (determinant <= 1e-5f)
+            return false;
+
+        for (int c = 0; c < 3; ++c)
+        {
+            const float h[2] = {(ay[c] * bb - by[c] * ab) / determinant,
+                                (by[c] * aa - ay[c] * ab) / determinant};
+            for (int e = 0; e < 2; ++e)
+            {
+                const uint16_t bits = uint16_t(fminf(31743.0f, fmaxf(0.0f, h[e])) + 0.5f);
+                endpoint[e][c] = quantize_endpoint(half_to_float(bits));
+            }
+        }
+        return true;
+    }
+
+    CDM_INLINE void refit_samples(const Float3 clean[16], const Float3 &mean, const Float3 &axis,
+                                 const float projections[16], uint32_t endpoint[2][3], uint32_t selector[16])
+    {
+        float aa = 0, ab = 0, bb = 0;
+        float ay[3] = {}, by[3] = {};
+        for (int i = 0; i < 16; ++i)
+        {
+            const float b = weight4(selector[texel_index(i)]) * (1.0f / 64.0f);
+            const float a = 1.0f - b;
+            aa += a * a;
+            ab += a * b;
+            bb += b * b;
+            const float values[3] = {clean[i].r, clean[i].g, clean[i].b};
+            for (int c = 0; c < 3; ++c)
+            {
+                const float y = float(float_to_half(values[c]));
+                ay[c] += a * y;
+                by[c] += b * y;
+            }
+        }
+        // Fit once in half-code space; retain the initial result for singular weights.
+        if (!refit_endpoints(aa, ab, bb, ay, by, endpoint))
+            return;
+
+        float palette_projection[16];
+        for (uint32_t j = 0; j < 16; ++j)
+            palette_projection[j] = dot(palette_color(endpoint, j) - mean, axis);
+        for (int i = 0; i < 16; ++i)
+        {
+            float best = 1e30f;
+            uint32_t index = 0;
+            for (uint32_t j = 0; j < 16; ++j)
+            {
+                const float delta = projections[i] - palette_projection[j];
+                const float error = delta * delta;
+                if (error < best)
+                {
+                    best = error;
+                    index = j;
+                }
+            }
+            selector[texel_index(i)] = index;
+        }
+    }
+
     // shortcut: encode Mode 11 only; add mode search if measured HDR quality is insufficient.
     CDM_INLINE bc6h::Block encode_samples_scalar(const Float3 samples[16])
     {
         Float3 clean[16];
         Float3 mean = Float3{};
+
         for (int i = 0; i < 16; ++i)
         {
             clean[i] = sanitize_hdr(samples[i]);
             mean += clean[i];
         }
         mean = mean * (1.0f / 16.0f);
+
         SymMat3 cov = SymMat3{};
         for (int i = 0; i < 16; ++i)
             accumulate_outer(cov, clean[i] - mean, 1.0f / 16.0f);
+
         Float3 axis = compute_principal_axis(cov);
+        Float3 sample_min = clean[0];
         float projections[16];
         float minimum = 1e30f, maximum = -1e30f;
         for (int i = 0; i < 16; ++i)
         {
+            sample_min.r = fminf(sample_min.r, clean[i].r);
+            sample_min.g = fminf(sample_min.g, clean[i].g);
+            sample_min.b = fminf(sample_min.b, clean[i].b);
             const float p = dot(clean[i] - mean, axis);
             projections[i] = p;
             minimum = p < minimum ? p : minimum;
             maximum = p > maximum ? p : maximum;
         }
+
         Float3 p[2] = {mean + axis * minimum, mean + axis * maximum};
         if (hdr_covariance_degenerate(cov, mean))
             p[0] = p[1] = mean;
+
+        // Keep negative PCA components from introducing a zero HDR endpoint.
+        if (p[0].r < 0.0f) p[0].r = sample_min.r;
+        if (p[0].g < 0.0f) p[0].g = sample_min.g;
+        if (p[0].b < 0.0f) p[0].b = sample_min.b;
+
         float component[2][3] = {{p[0].r, p[0].g, p[0].b}, {p[1].r, p[1].g, p[1].b}};
         uint32_t endpoint[2][3];
         for (int e = 0; e < 2; ++e)
             for (int c = 0; c < 3; ++c)
                 endpoint[e][c] = quantize_endpoint(component[e][c]);
+
         float palette_projection[16];
         for (uint32_t i = 0; i < 16; ++i)
             palette_projection[i] = dot(palette_color(endpoint, i) - mean, axis);
+        
         uint32_t selector[16];
         for (int i = 0; i < 16; ++i)
         {
@@ -1091,6 +1171,7 @@ namespace bc6h
             }
             selector[texel_index(i)] = best_index;
         }
+        refit_samples(clean, mean, axis, projections, endpoint, selector);
         return pack_mode11(endpoint, selector);
     }
 

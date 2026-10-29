@@ -41,12 +41,15 @@ namespace bc6h
         const __m128 variance = _mm_add_ps(_mm_add_ps(covariance.rr, covariance.gg), covariance.bb);
         const __m128 flat = _mm_cmple_ps(variance, threshold);
         Float3x4 low = select(mean + axis * minimum, mean, flat);
-        const Float3x4 high = select(mean + axis * maximum, mean, flat);
+        Float3x4 high = select(mean + axis * maximum, mean, flat);
         // Keep negative PCA components from introducing a zero HDR endpoint.
         const __m128 zero = _mm_setzero_ps();
         low.r = _mm_blendv_ps(low.r, sample_min.r, _mm_cmplt_ps(low.r, zero));
         low.g = _mm_blendv_ps(low.g, sample_min.g, _mm_cmplt_ps(low.g, zero));
         low.b = _mm_blendv_ps(low.b, sample_min.b, _mm_cmplt_ps(low.b, zero));
+        high.r = _mm_blendv_ps(high.r, sample_min.r, _mm_cmplt_ps(high.r, zero));
+        high.g = _mm_blendv_ps(high.g, sample_min.g, _mm_cmplt_ps(high.g, zero));
+        high.b = _mm_blendv_ps(high.b, sample_min.b, _mm_cmplt_ps(high.b, zero));
         alignas(16) float values[2][3][4], means[3][4], axes[3][4];
         _mm_store_ps(values[0][0], low.r);
         _mm_store_ps(values[0][1], low.g);

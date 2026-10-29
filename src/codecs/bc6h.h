@@ -1142,6 +1142,9 @@ namespace bc6h
         if (p[0].r < 0.0f) p[0].r = sample_min.r;
         if (p[0].g < 0.0f) p[0].g = sample_min.g;
         if (p[0].b < 0.0f) p[0].b = sample_min.b;
+        if (p[1].r < 0.0f) p[1].r = sample_min.r;
+        if (p[1].g < 0.0f) p[1].g = sample_min.g;
+        if (p[1].b < 0.0f) p[1].b = sample_min.b;
 
         float component[2][3] = {{p[0].r, p[0].g, p[0].b}, {p[1].r, p[1].g, p[1].b}};
         uint32_t endpoint[2][3];

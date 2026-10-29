@@ -96,6 +96,9 @@ namespace bc6h
             if (p0.r < 0.0f) p0.r = sample_min.r;
             if (p0.g < 0.0f) p0.g = sample_min.g;
             if (p0.b < 0.0f) p0.b = sample_min.b;
+            if (p1.r < 0.0f) p1.r = sample_min.r;
+            if (p1.g < 0.0f) p1.g = sample_min.g;
+            if (p1.b < 0.0f) p1.b = sample_min.b;
             endpoints[0][0] = quantize_endpoint(p0.r);
             endpoints[0][1] = quantize_endpoint(p0.g);
             endpoints[0][2] = quantize_endpoint(p0.b);

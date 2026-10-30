@@ -73,6 +73,21 @@ struct CudaWorkspace
     DeviceBuffer<uint8_t> data;
     DeviceBuffer<float> base;
     DeviceBuffer<float> scratch;
+    DeviceBuffer<Float3> bc1_pixels;
+    std::array<size_t, MAX_MIP_LEVELS> bc1_pixel_offsets{};
+
+    bool prepare_bc1_pyramid(const Image &image)
+    {
+        size_t count = 0;
+
+        for (uint32_t level = 0; level < image.mip_count; ++level)
+        {
+            bc1_pixel_offsets[level] = count;
+            count += static_cast<size_t>(image.mips[level].width) * image.mips[level].height;
+        }
+
+        return bc1_pixels.allocate(count);
+    }
 
     bool prepare(const Image &image)
     {
@@ -85,10 +100,8 @@ struct CudaWorkspace
         const size_t base_count = static_cast<size_t>(bw) * bh;
         const size_t scratch_count = static_cast<size_t>(sw) * sh;
 
-        const size_t channels =
-            (image.format == Format::BC7 || image.format == Format::BC2 || image.format == Format::BC3) ? 4 : 3;
-        return data.allocate(image.data_size) && base.allocate(base_count * channels) &&
-               scratch.allocate(scratch_count * channels);
+        const size_t channels = (image.format == Format::BC7 || image.format == Format::BC2 || image.format == Format::BC3) ? 4 : 3;
+        return data.allocate(image.data_size) && base.allocate(base_count * channels) && scratch.allocate(scratch_count * channels);
     }
 };
 
@@ -101,6 +114,75 @@ static MeanImage device_mean_view(float *data, size_t channel_capacity, uint32_t
 // For ablation study, if we choose true about two options, we can use two methods of mipmap generation.
 static constexpr bool bc1_use_histogram = true;
 static constexpr bool bc1_use_mean_pyramid = true;
+
+// for ablation study for only BC1 baseline
+static __global__ void decoded_bc1_mip(const bc1::Block *source, MipLevel level, Float3 *pixels, bool is_srgb)
+{
+    const size_t index = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (index >= static_cast<size_t>(level.width) * level.height)
+        return;
+
+    const uint32_t x = static_cast<uint32_t>(index % level.width);
+    const uint32_t y = static_cast<uint32_t>(index / level.width);
+
+    const size_t block_index = static_cast<size_t>(y / 4) * level.block_count_x + x / 4;
+
+    const bc1::Block block = source[block_index];
+    const uint32_t texel = (y % 4) * 4 + x % 4;
+    const uint32_t selector = (block.indices >> (texel * 2)) & 3u;
+
+    pixels[index] = bc1::device_palette_color(block.c0, block.c1, selector, is_srgb);
+}
+
+static __global__ void downsample_bc1_mip(const Float3 *source, MipLevel source_level, Float3 *destination, MipLevel destination_level)
+{
+    const size_t index = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (index >= static_cast<size_t>(destination_level.width) * destination_level.height)
+        return;
+
+    const uint32_t x = static_cast<uint32_t>(index % destination_level.width);
+    const uint32_t y = static_cast<uint32_t>(index / destination_level.width);
+
+    const uint32_t x0 = x * 2;
+    const uint32_t y0 = y * 2;
+    const uint32_t x1 = min(x0 + 1, source_level.width - 1);
+    const uint32_t y1 = min(y0 + 1, source_level.height - 1);
+
+    const size_t row0 = static_cast<size_t>(y0) * source_level.width;
+    const size_t row1 = static_cast<size_t>(y1) * source_level.width;
+
+    destination[index] = (source[row0 + x0] + source[row0 + x1] + source[row1 + x0] + source[row1 + x1]) * 0.25f;
+}
+
+// Encode one float mip using the existing BC1 encoder.
+static __global__ void encode_bc1_mip(const Float3 *pixels, MipLevel level, bc1::Block *destination, bool is_srgb)
+{
+    const uint32_t output = blockIdx.x * (blockDim.x / 16) + threadIdx.x / 16;
+
+    if (output >= level.block_count_x * level.block_count_y)
+        return;
+
+    const uint32_t lane = threadIdx.x & 15u;
+    const uint32_t bx = output % level.block_count_x;
+    const uint32_t by = output / level.block_count_x;
+
+    const uint32_t local_x = (lane & 1u) | ((lane >> 1u) & 2u);
+    const uint32_t local_y = ((lane >> 1u) & 1u) | ((lane >> 2u) & 2u);
+
+    const uint32_t valid_width = min(4u, level.width - bx * 4);
+    const uint32_t valid_height = min(4u, level.height - by * 4);
+
+    const uint32_t x = bx * 4 + min(local_x, valid_width - 1);
+    const uint32_t y = by * 4 + min(local_y, valid_height - 1);
+
+    Float3 sample = pixels[static_cast<size_t>(y) * level.width + x];
+
+    if (valid_width < 4 || valid_height < 4)
+        sample = bc1::repeat_small_sample(sample, valid_width, valid_height);
+
+    bc1::encode_half_warp(sample, is_srgb, destination + output);
+}
+
 
 // Generate mip 1 and store the means needed by later levels.
 static __global__ void generate_base_mip(const bc1::Block *source, MipLevel source_level, bc1::Block *destination,
@@ -380,6 +462,11 @@ bool generate_mipmaps_cuda(Image &image, float *generation_time_ms)
     const MipLevel &base_level = image.mips[0];
     uint8_t *device_data = workspace.data.get();
 
+    // for ablation study of BC1 
+    const bool bc1_baseline = image.format == Format::BC1 && !bc1_use_histogram && !bc1_use_mean_pyramid;
+    if (bc1_baseline && !workspace.prepare_bc1_pyramid(image))
+        return false;
+
     // Upload only mip 0.
     if (!cuda_chk(cudaMemcpy(device_data + base_level.byte_offset, image.data + base_level.byte_offset,
                              base_level.byte_size, cudaMemcpyHostToDevice),
@@ -434,11 +521,70 @@ bool generate_mipmaps_cuda(Image &image, float *generation_time_ms)
         return false;
     }
 
+    if (bc1_baseline)
+    {
+        const size_t pixel_count = static_cast<size_t>(base_level.width) * base_level.height;
+
+        const uint32_t groups = static_cast<uint32_t>((pixel_count + threads - 1) / threads);
+
+        const auto *source = reinterpret_cast<const bc1::Block *>(device_data + base_level.byte_offset);
+
+        Float3 *pixels = workspace.bc1_pixels.get() + workspace.bc1_pixel_offsets[0];
+
+        decoded_bc1_mip<<<groups, threads>>>(source, base_level, pixels, image.is_srgb);
+
+        if (!cuda_chk(cudaGetLastError(), "Launch BC1 decode kernel"))
+        {
+            cudaEventDestroy(end);
+            cudaEventDestroy(start);
+            return false;
+        }
+
+        for (uint32_t level = 1; level < image.mip_count; ++level)
+        {
+            const MipLevel &previous = image.mips[level - 1];
+            const MipLevel &current = image.mips[level];
+
+            const Float3 *source_pixels = workspace.bc1_pixels.get() + workspace.bc1_pixel_offsets[level - 1];
+            Float3 *destination_pixels = workspace.bc1_pixels.get() + workspace.bc1_pixel_offsets[level];
+
+            const size_t count = static_cast<size_t>(current.width) * current.height;
+            const uint32_t downsample_groups = static_cast<uint32_t>((count + threads - 1) / threads);
+
+            downsample_bc1_mip<<<downsample_groups, threads>>>(source_pixels, previous, destination_pixels, current);
+
+            if (!cuda_chk(cudaGetLastError(), "Launch BC1 downsample kernel"))
+            {
+                cudaEventDestroy(end);
+                cudaEventDestroy(start);
+                return false;
+            }
+        }
+    }
+
     for (uint32_t level = 1; level < image.mip_count; ++level)
     {
         const MipLevel &current = image.mips[level];
         const uint32_t block_count = current.block_count_x * current.block_count_y;
         const uint32_t groups = (block_count + blocks_per_group - 1) / blocks_per_group;
+
+        if (bc1_baseline)
+        {
+            const Float3 *pixels = workspace.bc1_pixels.get() + workspace.bc1_pixel_offsets[level];
+
+            auto *destination = reinterpret_cast<bc1::Block *>(device_data + current.byte_offset);
+
+            encode_bc1_mip<<<groups, threads>>>(pixels, current, destination, image.is_srgb);
+
+            if (!cuda_chk(cudaGetLastError(), "Launch BC1 encode kernel"))
+            {
+                cudaEventDestroy(end);
+                cudaEventDestroy(start);
+                return false;
+            }
+
+            continue;
+        }
 
         if (image.format == Format::BC1 && !bc1_use_mean_pyramid)
         {
@@ -661,3 +807,5 @@ bool generate_mipmaps_cuda(Image &image, float *generation_time_ms)
     return cuda_chk(cudaMemcpy(image.data + offset, device_data + offset, bytes, cudaMemcpyDeviceToHost),
                     "Download mip chain");
 }
+
+
